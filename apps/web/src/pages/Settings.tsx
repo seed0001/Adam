@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, type DiscordConfig, type DaemonConfig, type BudgetConfig } from "../lib/api";
+import { api, type DiscordConfig, type DaemonConfig, type BudgetConfig, type MemoryConfig } from "../lib/api";
 
 // ── Reusable primitives ───────────────────────────────────────────────────────
 
@@ -392,6 +392,116 @@ function BudgetSection({ initial }: { initial: BudgetConfig }) {
   );
 }
 
+function MemorySection({ initial }: { initial: MemoryConfig }) {
+  const [cfg, setCfg] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const set = <K extends keyof MemoryConfig>(key: K, value: MemoryConfig[K]) => {
+    setCfg((c) => ({ ...c, [key]: value }));
+    setSaved(false);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.patchMemoryConfig(cfg);
+      setCfg(res.config);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Confidence threshold as a percentage label
+  const minPct = Math.round(cfg.decayMinConfidence * 100);
+
+  return (
+    <Section title="Memory Lifecycle">
+      <p className="text-xs text-zinc-600 leading-relaxed -mt-1">
+        Profile facts have a living confidence score. Facts used in conversations are reinforced.
+        Facts that go unreferenced decay over time and are pruned when they fall below the threshold.
+        User-entered and protected facts are immune.
+      </p>
+
+      <Field
+        label="Decay half-life"
+        hint="Days until an unreferenced fact loses half its confidence. Lower = faster forgetting."
+      >
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={1}
+            max={365}
+            step={1}
+            value={cfg.decayHalfLifeDays}
+            onChange={(e) => set("decayHalfLifeDays", parseInt(e.target.value, 10))}
+            className="flex-1 accent-cyan-400"
+          />
+          <span className="text-sm text-zinc-300 w-16 text-right font-mono tabular-nums">
+            {cfg.decayHalfLifeDays}d
+          </span>
+        </div>
+        <div className="flex justify-between text-xs text-zinc-700 mt-0.5 px-0.5">
+          <span>1d (aggressive)</span>
+          <span>30d (default)</span>
+          <span>365d (permanent)</span>
+        </div>
+      </Field>
+
+      <Field
+        label="Pruning threshold"
+        hint="Facts that decay below this confidence are permanently removed."
+      >
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={1}
+            max={95}
+            step={1}
+            value={minPct}
+            onChange={(e) => set("decayMinConfidence", parseInt(e.target.value, 10) / 100)}
+            className="flex-1 accent-cyan-400"
+          />
+          <span className="text-sm text-zinc-300 w-16 text-right font-mono tabular-nums">
+            {minPct}%
+          </span>
+        </div>
+        <div className="flex justify-between text-xs text-zinc-700 mt-0.5 px-0.5">
+          <span>1% (tolerant)</span>
+          <span>25% (default)</span>
+          <span>95% (aggressive pruning)</span>
+        </div>
+      </Field>
+
+      <Field
+        label="Consolidation window"
+        hint="Episodic sessions older than this many days are eligible for long-term consolidation."
+      >
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={1}
+            max={90}
+            step={1}
+            value={cfg.consolidateAfterDays}
+            onChange={(e) => set("consolidateAfterDays", parseInt(e.target.value, 10))}
+            className="flex-1 accent-cyan-400"
+          />
+          <span className="text-sm text-zinc-300 w-16 text-right font-mono tabular-nums">
+            {cfg.consolidateAfterDays}d
+          </span>
+        </div>
+      </Field>
+
+      <div className="flex justify-end pt-1">
+        <SaveButton onClick={() => void save()} saving={saving} saved={saved} />
+      </div>
+    </Section>
+  );
+}
+
 function PersonalitySection() {
   const [content, setContent] = useState<string | null>(null);
   const [filePath, setFilePath] = useState<string>("");
@@ -500,6 +610,7 @@ export default function Settings() {
     discord: DiscordConfig;
     daemon: DaemonConfig;
     budget: BudgetConfig;
+    memory: MemoryConfig;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -508,8 +619,8 @@ export default function Settings() {
     setLoading(true);
     setError(null);
     try {
-      const cfg = await api.getConfig();
-      setConfig({ discord: cfg.discord, daemon: cfg.daemon, budget: cfg.budget });
+      const [cfg, mem] = await Promise.all([api.getConfig(), api.getMemoryConfig()]);
+      setConfig({ discord: cfg.discord, daemon: cfg.daemon, budget: cfg.budget, memory: mem });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Cannot reach daemon");
     } finally {
@@ -552,9 +663,10 @@ export default function Settings() {
       </div>
 
       <PersonalitySection />
+      <MemorySection initial={config.memory} />
       <AgentSection initial={config.daemon} />
-      <DiscordSection initial={config.discord} />
       <BudgetSection initial={config.budget} />
+      <DiscordSection initial={config.discord} />
     </div>
   );
 }

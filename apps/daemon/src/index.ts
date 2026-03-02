@@ -63,6 +63,7 @@ type ApiContext = {
   episodic: EpisodicStore;
   discordAdapter: DiscordAdapter | null;
   personality: PersonalityStore;
+  consolidator: MemoryConsolidator;
 };
 
 type AdapterBundle = { adapters: BaseAdapter[]; discordAdapter: DiscordAdapter | null };
@@ -198,10 +199,14 @@ async function main() {
 
   // Start the stochastic memory consolidator — decays unused facts, extracts
   // durable knowledge from old episodes. No global clock; fires at random intervals.
-  const consolidator = new MemoryConsolidator(profile, episodic, router);
+  const consolidator = new MemoryConsolidator(profile, episodic, router, {
+    decayHalfLifeDays: config.memory.decayHalfLifeDays,
+    decayMinConfidence: config.memory.decayMinConfidence,
+    consolidateAfterDays: config.memory.consolidateAfterDays,
+  });
   consolidator.start();
 
-  const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter, personality };
+  const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter, personality, consolidator };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
     logger.info(`API server on http://localhost:${config.daemon.port}`);
@@ -456,6 +461,26 @@ function createApiServer(ctx: ApiContext) {
         if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
         ctx.config = updated;
         return json(res, 200, { ok: true, config: updated.budget });
+      }
+
+      // ── GET /api/config/memory ─────────────────────────────────────────────
+      if (path === "/api/config/memory" && req.method === "GET") {
+        return json(res, 200, { memory: ctx.config.memory });
+      }
+
+      // ── PATCH /api/config/memory ───────────────────────────────────────────
+      if (path === "/api/config/memory" && req.method === "PATCH") {
+        const patch = (await readBody(req)) as Partial<AdamConfig["memory"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          memory: { ...ctx.config.memory, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        // Hot-reload consolidator parameters immediately
+        if (ctx.consolidator) ctx.consolidator.updateOptions(patch);
+        return json(res, 200, { ok: true, config: updated.memory });
       }
 
       // ── GET /api/vault/status ─────────────────────────────────────────────

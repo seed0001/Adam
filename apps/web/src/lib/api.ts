@@ -109,6 +109,12 @@ export type ProvidersConfig = {
   huggingface: HuggingFaceConfig;
 };
 
+export type MemoryConfig = {
+  decayHalfLifeDays: number;
+  decayMinConfidence: number;
+  consolidateAfterDays: number;
+};
+
 export type VaultStatus = Record<string, boolean>;
 
 export const api = {
@@ -187,6 +193,15 @@ export const api = {
 
   patchProviders: (patch: Partial<ProvidersConfig>) =>
     apiFetch<{ ok: boolean; providers: ProvidersConfig }>("/api/config/providers", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  getMemoryConfig: () =>
+    apiFetch<{ memory: MemoryConfig }>("/api/config/memory").then((r) => r.memory),
+
+  patchMemoryConfig: (patch: Partial<MemoryConfig>) =>
+    apiFetch<{ ok: boolean; config: MemoryConfig }>("/api/config/memory", {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),

@@ -134,8 +134,11 @@ export function registerChatCommand(program: Command): void {
 
         // Stochastic memory consolidator — runs in the background during CLI sessions too
         consolidator = new MemoryConsolidator(profile, episodic, router, {
-          minIntervalMs: 15 * 60 * 1000, // 15 min min for interactive sessions
+          minIntervalMs: 15 * 60 * 1000, // longer intervals for interactive sessions
           maxIntervalMs: 30 * 60 * 1000,
+          decayHalfLifeDays: config.memory.decayHalfLifeDays,
+          decayMinConfidence: config.memory.decayMinConfidence,
+          consolidateAfterDays: config.memory.consolidateAfterDays,
         });
         consolidator.start();
 
@@ -195,17 +198,19 @@ async function runRepl(
   const HELP = [
     "",
     chalk.bold("  Commands:"),
-    `  ${chalk.white("/help")}                    — show this message`,
-    `  ${chalk.white("/memory")}                  — show what Adam knows about you`,
-    `  ${chalk.white("/remember <key> = <value>")} — manually store a fact (protected, never decays)`,
-    `  ${chalk.white("/forget <key>")}             — delete a specific memory`,
-    `  ${chalk.white("/forget all")}               — clear all profile memory`,
-    `  ${chalk.white("/protect <key>")}            — lock a memory so it never decays`,
-    `  ${chalk.white("/unprotect <key>")}          — allow a memory to decay naturally`,
-    `  ${chalk.white("/personality")}              — view Adam's personality profile`,
-    `  ${chalk.white("/personality reset")}        — reset personality to defaults`,
-    `  ${chalk.white("/clear")}                    — clear the screen`,
-    `  ${chalk.white("/exit")}                     — end the session`,
+    `  ${chalk.white("/help")}                       — show this message`,
+    `  ${chalk.white("/memory")}                     — show profile memory with decay health`,
+    `  ${chalk.white("/memory decay <days>")}        — set half-life (default: ${config.memory.decayHalfLifeDays}d)`,
+    `  ${chalk.white("/memory min <0.0-0.99>")}      — set pruning threshold (default: ${config.memory.decayMinConfidence})`,
+    `  ${chalk.white("/remember <key> = <value>")}   — manually store a fact (protected, never decays)`,
+    `  ${chalk.white("/forget <key>")}               — delete a specific memory`,
+    `  ${chalk.white("/forget all")}                 — clear all profile memory`,
+    `  ${chalk.white("/protect <key>")}              — lock a memory so it never decays`,
+    `  ${chalk.white("/unprotect <key>")}            — allow a memory to decay naturally`,
+    `  ${chalk.white("/personality")}                — view Adam's personality profile`,
+    `  ${chalk.white("/personality reset")}          — reset personality to defaults`,
+    `  ${chalk.white("/clear")}                      — clear the screen`,
+    `  ${chalk.white("/exit")}                       — end the session`,
     "",
   ].join("\n");
 
@@ -239,6 +244,38 @@ async function runRepl(
       ask();
       return;
     }
+    if (input.startsWith("/memory decay")) {
+      const arg = input.slice("/memory decay".length).trim();
+      const days = Number(arg);
+      if (!arg || isNaN(days) || days < 1 || days > 365) {
+        console.log(chalk.gray(`\n  Usage: /memory decay <days>  (1–365)\n  Current: ${config.memory.decayHalfLifeDays} days\n`));
+      } else {
+        config.memory.decayHalfLifeDays = days;
+        const { saveConfig } = await import("@adam/shared");
+        saveConfig(config);
+        consolidator.updateOptions({ decayHalfLifeDays: days });
+        console.log(chalk.green(`\n  Decay half-life set to ${days} days.\n`) + chalk.gray("  Saved to config.\n"));
+      }
+      ask();
+      return;
+    }
+
+    if (input.startsWith("/memory min")) {
+      const arg = input.slice("/memory min".length).trim();
+      const val = Number(arg);
+      if (!arg || isNaN(val) || val < 0.01 || val > 0.99) {
+        console.log(chalk.gray(`\n  Usage: /memory min <0.01–0.99>\n  Current: ${config.memory.decayMinConfidence}\n`));
+      } else {
+        config.memory.decayMinConfidence = val;
+        const { saveConfig } = await import("@adam/shared");
+        saveConfig(config);
+        consolidator.updateOptions({ decayMinConfidence: val });
+        console.log(chalk.green(`\n  Pruning threshold set to ${val} (${Math.round(val * 100)}%).\n`) + chalk.gray("  Saved to config.\n"));
+      }
+      ask();
+      return;
+    }
+
     if (input === "/memory") {
       const facts = profile.getAll();
       if (facts.length === 0) {

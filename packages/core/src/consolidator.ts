@@ -28,9 +28,10 @@ export class MemoryConsolidator {
     private episodic: EpisodicStore,
     private router: ModelRouter,
     private options: {
-      minIntervalMs?: number; // default 8 min
-      maxIntervalMs?: number; // default 18 min
-      decayHalfLifeDays?: number; // default 30
+      minIntervalMs?: number;        // default 8 min
+      maxIntervalMs?: number;        // default 18 min
+      decayHalfLifeDays?: number;    // default 30
+      decayMinConfidence?: number;   // default 0.25
       consolidateAfterDays?: number; // default 14
     } = {},
   ) {
@@ -51,6 +52,12 @@ export class MemoryConsolidator {
       this.timer = null;
     }
     logger.info("Memory consolidator stopped");
+  }
+
+  /** Update decay/consolidation parameters at runtime without restarting. */
+  updateOptions(patch: Partial<typeof this.options>): void {
+    Object.assign(this.options, patch);
+    logger.info("Consolidator options updated", patch);
   }
 
   /** Run a full consolidation cycle immediately (also called on schedule). */
@@ -80,6 +87,7 @@ export class MemoryConsolidator {
       // 1. Decay: let unreferenced facts lose confidence and eventually die
       const decayStats = this.profile.decay(
         this.options.decayHalfLifeDays ?? 30,
+        this.options.decayMinConfidence ?? 0.25,
       );
       if (decayStats.removed > 0 || decayStats.decayed > 0) {
         logger.info("Memory decay applied", {

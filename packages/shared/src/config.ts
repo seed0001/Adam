@@ -112,6 +112,28 @@ export const VoiceConfigSchema = z.object({
 });
 export type VoiceConfig = z.infer<typeof VoiceConfigSchema>;
 
+// ── Memory config ─────────────────────────────────────────────────────────────
+
+export const MemoryConfigSchema = z.object({
+  /**
+   * Half-life of auto-extracted profile facts in days.
+   * After this many days without being referenced in a prompt, a fact's
+   * confidence is halved. Facts below `decayMinConfidence` are pruned.
+   */
+  decayHalfLifeDays: z.number().min(1).max(365).default(30),
+  /**
+   * Confidence floor — facts that decay below this value are deleted.
+   * Range: 0.01 – 0.99
+   */
+  decayMinConfidence: z.number().min(0.01).max(0.99).default(0.25),
+  /**
+   * Episodic sessions older than this many days are eligible for consolidation
+   * into long-term profile facts by the background consolidator.
+   */
+  consolidateAfterDays: z.number().min(1).max(90).default(14),
+});
+export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
+
 // ── Daemon config ─────────────────────────────────────────────────────────────
 
 export const DaemonConfigSchema = z.object({
@@ -129,6 +151,7 @@ export const AdamConfigSchema = z.object({
   version: z.string().default("1"),
   providers: ProvidersConfigSchema.default({}),
   adapters: AdaptersConfigSchema.default({}),
+  memory: MemoryConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
   voice: VoiceConfigSchema.default({}),
   daemon: DaemonConfigSchema.default({}),

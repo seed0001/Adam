@@ -240,9 +240,75 @@ export function registerInitCommand(program: Command): void {
         console.warn(chalk.green("  ✓ Discord token stored in OS keychain"));
       }
 
-      // ── Step 4: Budget ────────────────────────────────────────────────────
+      // ── Step 4: Voice ─────────────────────────────────────────────────────
 
-      console.warn(chalk.bold("\n  4/4  Budget Caps\n"));
+      console.warn(chalk.bold("\n  4/5  Voice Synthesis\n"));
+      console.warn(
+        chalk.gray("  LuxTTS enables voice output via a Python sidecar.\n") +
+          chalk.gray("  Requires Python ≥ 3.10. Entirely optional.\n"),
+      );
+
+      const { enableVoice } = await inquirer.prompt<{ enableVoice: boolean }>([
+        {
+          type: "confirm",
+          name: "enableVoice",
+          message: "Enable LuxTTS voice synthesis?",
+          default: false,
+        },
+      ]);
+
+      if (enableVoice) {
+        // Detect Python availability
+        const pythonCmd = await detectPython();
+
+        if (!pythonCmd) {
+          console.warn(
+            chalk.yellow("  ⚠  Python not found on PATH.\n") +
+              chalk.gray("     Install Python 3.10+ and re-run 'adam init' to set up voice.\n"),
+          );
+          config.voice = { ...config.voice, enabled: false };
+        } else {
+          console.warn(chalk.green(`  ✓ Found Python: ${pythonCmd}`));
+
+          const { installDeps } = await inquirer.prompt<{ installDeps: boolean }>([
+            {
+              type: "confirm",
+              name: "installDeps",
+              message: "Install LuxTTS Python dependencies now? (pip install -r requirements.txt)",
+              default: true,
+            },
+          ]);
+
+          if (installDeps) {
+            const voiceSpinner = ora("Installing LuxTTS dependencies…").start();
+            const installResult = await installVoiceDeps(pythonCmd);
+            if (installResult.ok) {
+              voiceSpinner.succeed(chalk.green("LuxTTS dependencies installed"));
+            } else {
+              voiceSpinner.warn(
+                chalk.yellow(`Dependency install failed: ${installResult.error}\n`) +
+                  chalk.gray("  You can install manually: cd packages/voice/sidecar && pip install -r requirements.txt\n"),
+              );
+            }
+          }
+
+          const { autoStart } = await inquirer.prompt<{ autoStart: boolean }>([
+            {
+              type: "confirm",
+              name: "autoStart",
+              message: "Auto-start the voice sidecar when Adam starts?",
+              default: true,
+            },
+          ]);
+
+          config.voice = { enabled: true, autoStartSidecar: autoStart };
+          console.warn(chalk.green("  ✓ Voice enabled"));
+        }
+      }
+
+      // ── Step 5: Budget ────────────────────────────────────────────────────
+
+      console.warn(chalk.bold("\n  5/5  Budget Caps\n"));
       console.warn(chalk.gray("  Set spend limits so cloud API bills stay predictable.\n"));
 
       const { setBudget } = await inquirer.prompt<{ setBudget: boolean }>([
@@ -304,6 +370,70 @@ export function registerInitCommand(program: Command): void {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Tries `python`, `python3`, `py` in order.
+ * Returns the command name that works, or null if none found.
+ */
+async function detectPython(): Promise<string | null> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const exec = promisify(execFile);
+
+  for (const cmd of ["python", "python3", "py"]) {
+    try {
+      const { stdout, stderr } = await exec(cmd, ["--version"]);
+      // Python 2 prints to stderr, Python 3 prints to stdout — check both
+      const version = (stdout.trim() || stderr.trim() || "");
+      const match = version.match(/Python (\d+)\.(\d+)/);
+      if (match) {
+        const major = parseInt(match[1]!, 10);
+        const minor = parseInt(match[2]!, 10);
+        if (major === 3 && minor >= 10) return `${cmd} — ${version.replace(/\n/g, "")}`;
+        if (major > 3) return `${cmd} — ${version.replace(/\n/g, "")}`;
+      }
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+/**
+ * Runs `pip install -r requirements.txt` inside packages/voice/sidecar.
+ */
+async function installVoiceDeps(pythonCmd: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { spawn } = await import("node:child_process");
+  const { join, dirname: pathDirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const { existsSync } = await import("node:fs");
+
+  // Resolve sidecar directory relative to this file (packages/cli/src/commands/init.ts)
+  const thisDir = pathDirname(fileURLToPath(import.meta.url));
+  const sidecarDir = join(thisDir, "../../../../packages/voice/sidecar");
+
+  // Fallback: try monorepo root relative path
+  const reqPath = existsSync(join(sidecarDir, "requirements.txt"))
+    ? join(sidecarDir, "requirements.txt")
+    : join(process.cwd(), "packages/voice/sidecar/requirements.txt");
+
+  if (!existsSync(reqPath)) {
+    return { ok: false, error: `requirements.txt not found at ${reqPath}` };
+  }
+
+  const pip = pythonCmd.split(" ")[0]!; // just the command name
+  return new Promise((resolve) => {
+    const proc = spawn(pip, ["-m", "pip", "install", "-r", reqPath], {
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    });
+    proc.on("close", (code) => {
+      if (code === 0) resolve({ ok: true });
+      else resolve({ ok: false, error: `pip exited with code ${code}` });
+    });
+    proc.on("error", (e) => resolve({ ok: false, error: e.message }));
+  });
+}
 
 function getDefaultModels(provider: string): { fast: string; capable: string } {
   const defaults: Record<string, { fast: string; capable: string }> = {
