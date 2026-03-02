@@ -11,7 +11,7 @@ import {
   adamError,
   createLogger,
 } from "@adam/shared";
-import type { ProviderRegistry } from "./registry.js";
+import type { ProviderRegistry, ModelPoolConfig } from "./registry.js";
 
 const logger = createLogger("models:router");
 
@@ -61,6 +61,19 @@ export class ModelRouter {
     private budget: BudgetConfig,
     private onUsage?: (usage: ModelUsage) => void,
   ) {}
+
+  /**
+   * Swaps in a freshly-built registry without restarting the process.
+   * Call this after rebuilding the model pool from updated config.
+   */
+  replaceRegistry(registry: ProviderRegistry): void {
+    this.registry = registry;
+  }
+
+  /** Returns the underlying pool — use this to report what's actually loaded. */
+  getPool(): ModelPoolConfig {
+    return this.registry.getPool();
+  }
 
   /** Returns a resolved language model for direct use in tool calling. */
   getModel(tier: ModelTier): Result<AnyLanguageModel, AdamError> {

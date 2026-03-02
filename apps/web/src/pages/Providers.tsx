@@ -32,14 +32,14 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
-function ModelInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function ModelInput({ label, value, placeholder = "model-name", onChange }: { label: string; value: string; placeholder?: string; onChange: (v: string) => void }) {
   return (
     <div className="flex items-center gap-3 min-w-0">
       <span className="text-xs text-zinc-600 w-14 shrink-0">{label}</span>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="model-name"
+        placeholder={placeholder}
         className="flex-1 min-w-0 bg-[#0a0a0a] border border-[#242424] rounded px-2 py-1 text-xs text-zinc-300 placeholder-zinc-700 focus:outline-none focus:border-[#333] font-mono"
       />
     </div>
@@ -298,10 +298,22 @@ function LocalProviderRow({
               className="flex-1 bg-[#0a0a0a] border border-[#242424] rounded px-2 py-1 text-xs text-zinc-300 placeholder-zinc-700 focus:outline-none focus:border-[#333] font-mono"
             />
           </div>
-          <div className="flex gap-4">
+          <div className="flex gap-4 flex-wrap">
             <ModelInput label="Fast" value={config.models.fast} onChange={(v) => onChange({ models: { ...config.models, fast: v } })} />
             <ModelInput label="Capable" value={config.models.capable} onChange={(v) => onChange({ models: { ...config.models, capable: v } })} />
+            <ModelInput
+              label="Coder"
+              value={config.models.coder ?? ""}
+              placeholder="e.g. deepseek-coder-v2"
+              onChange={(v) => onChange({ models: { ...config.models, coder: v || undefined } })}
+            />
           </div>
+          {config.models.coder && (
+            <p className="text-xs text-zinc-600 pl-0">
+              Coder model routes <code className="text-zinc-500">code_write_file</code>, <code className="text-zinc-500">code_edit_file</code>, and <code className="text-zinc-500">code_scaffold</code> tools.
+              Recommended: <span className="text-zinc-400">deepseek-coder-v2</span>, <span className="text-zinc-400">qwen2.5-coder</span>
+            </p>
+          )}
         </div>
       )}
     </div>

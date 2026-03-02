@@ -1,3 +1,28 @@
+export type SkillInput = { name: string; type: string; description: string; required: boolean; example?: string };
+export type SkillOutput = { name: string; type: string; description: string };
+export type SkillSpec = {
+  id: string;
+  name: string;
+  displayName: string;
+  version: string;
+  description: string;
+  status: "draft" | "approved" | "latent" | "active" | "deprecated";
+  triggers: string[];
+  inputs: SkillInput[];
+  outputs: SkillOutput[];
+  allowedTools: string[];
+  steps: string[];
+  artifacts: string[];
+  successCriteria: string[];
+  constraints: string[];
+  template: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt?: string;
+  activatedAt?: string;
+};
+
 export type ProfileFact = {
   id: string;
   key: string;
@@ -24,6 +49,7 @@ export type StatusData = {
   agentName: string;
   port: number;
   providers: { cloud: string[]; local: string[] };
+  activeModels: { fast: string | null; capable: string | null };
   budget: { dailyLimitUsd: number; monthlyLimitUsd: number; fallbackToLocalOnExhaustion: boolean };
   memory: { profileFacts: number; categories: string[] };
 };
@@ -85,7 +111,7 @@ export type CloudProviderConfig = {
 export type LocalProviderConfig = {
   enabled: boolean;
   baseUrl: string;
-  models: { fast: string; capable: string };
+  models: { fast: string; capable: string; coder?: string };
 };
 
 export type HuggingFaceConfig = {
@@ -205,5 +231,40 @@ export const api = {
     apiFetch<{ ok: boolean; config: MemoryConfig }>("/api/config/memory", {
       method: "PATCH",
       body: JSON.stringify(patch),
+    }),
+
+  getScratchpad: () =>
+    apiFetch<{ content: string | null; lastModified: string | null; path: string }>("/api/scratchpad"),
+
+  patchScratchpad: (content: string) =>
+    apiFetch<{ ok: boolean; lastModified: string | null }>("/api/scratchpad", {
+      method: "PATCH",
+      body: JSON.stringify({ content }),
+    }),
+
+  clearScratchpad: () =>
+    apiFetch<{ ok: boolean }>("/api/scratchpad", { method: "DELETE" }),
+
+  // ── Skills ────────────────────────────────────────────────────────────────
+
+  listSkills: () =>
+    apiFetch<{ skills: SkillSpec[] }>("/api/skills").then((r) => r.skills),
+
+  getSkill: (id: string) =>
+    apiFetch<{ skill: SkillSpec }>(`/api/skills/${id}`).then((r) => r.skill),
+
+  patchSkill: (id: string, patch: Partial<SkillSpec>) =>
+    apiFetch<{ ok: boolean; skill: SkillSpec }>(`/api/skills/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  deleteSkill: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/skills/${id}`, { method: "DELETE" }),
+
+  skillAction: (id: string, action: "approve" | "latent" | "activate" | "deprecate", body?: object) =>
+    apiFetch<{ ok: boolean; skill: SkillSpec }>(`/api/skills/${id}/action/${action}`, {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
     }),
 };

@@ -48,6 +48,12 @@ export type LocalProvider = "ollama" | "lmstudio" | "vllm" | "openai-compatible"
 export type ModelPoolConfig = {
   fast: ProviderConfig[];
   capable: ProviderConfig[];
+  /**
+   * Dedicated code-editing tier.
+   * Routes to a specialized local coder model (e.g. deepseek-coder-v2, qwen2.5-coder).
+   * If empty, falls back to the capable pool — so this is always safe to leave unset.
+   */
+  coder: ProviderConfig[];
   embedding: ProviderConfig[];
 };
 
@@ -58,8 +64,23 @@ export type ModelPoolConfig = {
 export class ProviderRegistry {
   constructor(private pool: ModelPoolConfig) {}
 
+  /** Returns the current pool — reflects what was actually loaded and vault-verified at build time. */
+  getPool(): ModelPoolConfig {
+    return this.pool;
+  }
+
   resolveLanguageModel(tier: ModelTier): Result<LanguageModel, AdamError> {
-    const configs = tier === "embedding" ? this.pool.capable : this.pool[tier];
+    let configs: ProviderConfig[];
+
+    if (tier === "embedding") {
+      configs = this.pool.capable;
+    } else if (tier === "coder") {
+      // Use dedicated coder pool if configured; fall back to capable so this
+      // always resolves even when no local coder model is installed.
+      configs = this.pool.coder.length > 0 ? this.pool.coder : this.pool.capable;
+    } else {
+      configs = this.pool[tier];
+    }
 
     for (const config of configs) {
       const result = this.buildLanguageModel(config);

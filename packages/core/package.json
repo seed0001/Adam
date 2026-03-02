@@ -24,6 +24,7 @@
     "@adam/models": "workspace:*",
     "@adam/memory": "workspace:*",
     "@adam/security": "workspace:*",
+    "@adam/skills": "workspace:*",
     "ai": "^4.0.0",
     "zod": "^3.0.0"
   },

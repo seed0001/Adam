@@ -26,7 +26,8 @@ import {
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator } from "@adam/core";
+import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator, ScratchpadStore } from "@adam/core";
+import { SkillStore } from "@adam/skills";
 import { tool } from "ai";
 import { z } from "zod";
 import {
@@ -41,6 +42,7 @@ import {
   writeFileTool,
   listDirectoryTool,
   shellTool,
+  createCodeTools,
 } from "@adam/skills";
 import type { CoreTool } from "ai";
 
@@ -59,10 +61,13 @@ addLogHandler((entry: LogEntry) => {
 type ApiContext = {
   config: AdamConfig;
   agent: Agent;
+  router: ModelRouter;
   profile: ProfileStore;
   episodic: EpisodicStore;
   discordAdapter: DiscordAdapter | null;
   personality: PersonalityStore;
+  scratchpad: ScratchpadStore;
+  skills: SkillStore;
   consolidator: MemoryConsolidator;
 };
 
@@ -93,6 +98,8 @@ async function main() {
   const episodic = new EpisodicStore(drizzleDb);
   const profile = new ProfileStore(drizzleDb);
   const personality = new PersonalityStore(config.daemon.agentName);
+  const scratchpad = new ScratchpadStore();
+  const skills = new SkillStore();
 
   const poolConfig = await buildModelPool(config);
   if (poolConfig.fast.length === 0 && poolConfig.capable.length === 0) {
@@ -167,6 +174,17 @@ async function main() {
     logger.info("Discord outbound tools registered (send_discord_message, list_discord_channels)");
   }
 
+  // Code tools — model-backed, routed to the coder tier (DeepSeek Coder / Qwen2.5-Coder).
+  // Falls back to capable if no dedicated coder model is configured.
+  // Uses a placeholder session ID here; each tool call will inherit the active session.
+  const codeTools = createCodeTools(router, generateId());
+  for (const [name, t] of codeTools) tools.set(name, t);
+  if (poolConfig.coder.length > 0) {
+    logger.info(`Code tools active with coder model: ${poolConfig.coder[0]?.model ?? "unknown"}`);
+  } else {
+    logger.info("Code tools active (falling back to capable tier — set ollama.models.coder for dedicated model)");
+  }
+
   const agent = new Agent(
     router,
     queue,
@@ -175,6 +193,8 @@ async function main() {
     { systemPrompt: buildSystemPrompt(config), name: config.daemon.agentName },
     profile,
     personality,
+    scratchpad,
+    skills,
   );
 
   for (const adapter of adapters) {
@@ -206,7 +226,7 @@ async function main() {
   });
   consolidator.start();
 
-  const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter, personality, consolidator };
+  const ctx: ApiContext = { config, agent, router, profile, episodic, discordAdapter, personality, scratchpad, skills, consolidator };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
     logger.info(`API server on http://localhost:${config.daemon.port}`);
@@ -341,15 +361,28 @@ function createApiServer(ctx: ApiContext) {
       // ── GET /api/status ────────────────────────────────────────────────────
       if (path === "/api/status" && req.method === "GET") {
         const facts = ctx.profile.getAll();
-        const cloudOn: string[] = [];
-        const cloud = ["anthropic", "openai", "google", "groq", "mistral", "deepseek", "openrouter"] as const;
-        for (const p of cloud) {
-          if (ctx.config.providers[p].enabled) cloudOn.push(p);
-        }
-        const localOn: string[] = [];
-        if (ctx.config.providers.ollama.enabled) localOn.push("ollama");
-        if (ctx.config.providers.lmstudio.enabled) localOn.push("lmstudio");
-        if (ctx.config.providers.vllm.enabled) localOn.push("vllm");
+
+        // Derive active provider lists from the actual loaded pool —
+        // these are vault-verified at startup/reload, not just config flags.
+        const pool = ctx.router.getPool();
+        const toLabel = (cfg: { type: string; provider?: string; model: string } | undefined) =>
+          cfg ? `${cfg.type === "cloud" ? (cfg as { provider: string }).provider : cfg.type}/${cfg.model}` : null;
+
+        const activeModels = {
+          fast: toLabel(pool.fast[0]),
+          capable: toLabel(pool.capable[0]),
+        };
+
+        const cloudOn = [...new Set(
+          pool.fast.concat(pool.capable)
+            .filter((c) => c.type === "cloud")
+            .map((c) => (c as { provider: string }).provider)
+        )];
+        const localOn = [...new Set(
+          pool.fast.concat(pool.capable)
+            .filter((c) => c.type === "local")
+            .map((c) => (c as { provider: string }).provider)
+        )];
 
         return json(res, 200, {
           version: ADAM_VERSION,
@@ -357,6 +390,7 @@ function createApiServer(ctx: ApiContext) {
           agentName: ctx.config.daemon.agentName,
           port: ctx.config.daemon.port,
           providers: { cloud: cloudOn, local: localOn },
+          activeModels,
           budget: ctx.config.budget,
           memory: {
             profileFacts: facts.length,
@@ -543,6 +577,13 @@ function createApiServer(ctx: ApiContext) {
         const saveResult = saveConfig(updated);
         if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
         ctx.config = updated;
+
+        // Rebuild the model pool from the new config so the change takes effect
+        // immediately — no restart required.
+        const newPool = await buildModelPool(updated);
+        ctx.router.replaceRegistry(new ProviderRegistry(newPool));
+        logger.info("Model pool hot-reloaded after provider config change");
+
         return json(res, 200, { ok: true, providers: updated.providers });
       }
 
@@ -570,6 +611,90 @@ function createApiServer(ctx: ApiContext) {
         return json(res, 200, { ok: true, content: ctx.personality.load() });
       }
 
+      // ── GET /api/scratchpad ────────────────────────────────────────────────
+      if (path === "/api/scratchpad" && req.method === "GET") {
+        return json(res, 200, {
+          content: ctx.scratchpad.load(),
+          lastModified: ctx.scratchpad.lastModified()?.toISOString() ?? null,
+          path: ctx.scratchpad.path,
+        });
+      }
+
+      // ── PATCH /api/scratchpad ──────────────────────────────────────────────
+      if (path === "/api/scratchpad" && req.method === "PATCH") {
+        const body = (await readBody(req)) as { content?: string };
+        if (typeof body.content !== "string") {
+          return json(res, 400, { error: "content is required" });
+        }
+        ctx.scratchpad.save(body.content);
+        return json(res, 200, { ok: true, lastModified: ctx.scratchpad.lastModified()?.toISOString() });
+      }
+
+      // ── DELETE /api/scratchpad ─────────────────────────────────────────────
+      if (path === "/api/scratchpad" && req.method === "DELETE") {
+        const { unlinkSync, existsSync } = await import("node:fs");
+        if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
+        return json(res, 200, { ok: true });
+      }
+
+      // ── GET /api/skills ────────────────────────────────────────────────────
+      if (path === "/api/skills" && req.method === "GET") {
+        return json(res, 200, { skills: ctx.skills.list() });
+      }
+
+      // ── GET /api/skills/:id ────────────────────────────────────────────────
+      if (path.startsWith("/api/skills/") && req.method === "GET" && !path.includes("/action/")) {
+        const id = path.slice("/api/skills/".length);
+        const skill = ctx.skills.get(id);
+        if (!skill) return json(res, 404, { error: "Skill not found" });
+        return json(res, 200, { skill });
+      }
+
+      // ── PATCH /api/skills/:id ──────────────────────────────────────────────
+      if (path.startsWith("/api/skills/") && req.method === "PATCH" && !path.includes("/action/")) {
+        const id = path.slice("/api/skills/".length);
+        const skill = ctx.skills.get(id);
+        if (!skill) return json(res, 404, { error: "Skill not found" });
+        const patch = (await readBody(req)) as Partial<typeof skill>;
+        // Only allow editing notes and steps on drafts — status changes go through actions
+        if (skill.status === "draft") {
+          if (patch.notes !== undefined) skill.notes = patch.notes;
+          if (patch.steps !== undefined) skill.steps = patch.steps;
+          if (patch.constraints !== undefined) skill.constraints = patch.constraints;
+          if (patch.successCriteria !== undefined) skill.successCriteria = patch.successCriteria;
+        }
+        ctx.skills.save(skill);
+        return json(res, 200, { ok: true, skill });
+      }
+
+      // ── DELETE /api/skills/:id ─────────────────────────────────────────────
+      if (path.startsWith("/api/skills/") && req.method === "DELETE" && !path.includes("/action/")) {
+        const id = path.slice("/api/skills/".length);
+        const deleted = ctx.skills.delete(id);
+        return json(res, deleted ? 200 : 404, { ok: deleted });
+      }
+
+      // ── POST /api/skills/:id/action/:action ────────────────────────────────
+      // Lifecycle transitions — these are the only gates to status changes
+      if (path.startsWith("/api/skills/") && path.includes("/action/") && req.method === "POST") {
+        const parts = path.split("/");
+        const id = parts[3];
+        const action = parts[5];
+        let updated = null;
+
+        if (action === "approve") updated = ctx.skills.approve(id);
+        else if (action === "latent") updated = ctx.skills.makeLatent(id);
+        else if (action === "deprecate") updated = ctx.skills.deprecate(id);
+        else if (action === "activate") {
+          const body = (await readBody(req)) as { template?: string };
+          const template = (body.template ?? "none") as Parameters<typeof ctx.skills.activate>[1];
+          updated = ctx.skills.activate(id, template);
+        }
+
+        if (!updated) return json(res, 400, { error: `Cannot apply action '${action}' to this skill in its current state` });
+        return json(res, 200, { ok: true, skill: updated });
+      }
+
       // ── Static web UI ──────────────────────────────────────────────────────
       serveStatic(res, path);
     } catch (e: unknown) {
@@ -584,6 +709,7 @@ function createApiServer(ctx: ApiContext) {
 async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   const fast: ProviderConfig[] = [];
   const capable: ProviderConfig[] = [];
+  const coder: ProviderConfig[] = [];
 
   const cloudProviders = [
     "anthropic", "openai", "google", "groq", "xai", "mistral", "deepseek", "openrouter",
@@ -604,6 +730,10 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
     const { models, baseUrl } = config.providers.ollama;
     fast.push({ type: "local", provider: "ollama", model: models.fast, baseUrl });
     capable.push({ type: "local", provider: "ollama", model: models.capable, baseUrl });
+    // Dedicated coder model — routes code_write/edit/scaffold tools
+    if (models.coder) {
+      coder.push({ type: "local", provider: "ollama", model: models.coder, baseUrl });
+    }
   }
   if (config.providers.lmstudio.enabled) {
     const { models, baseUrl } = config.providers.lmstudio;
@@ -628,7 +758,7 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   }
 
   return {
-    fast, capable,
+    fast, capable, coder,
     embedding: [{ type: "huggingface", mode: "transformers", model: config.providers.huggingface.embeddingModel }],
   };
 }
@@ -712,6 +842,16 @@ Tools you have right now — use them:
 - shell: run any shell command on this machine
 - send_discord_message: post a message to a Discord channel by channel ID
 - list_discord_channels: list all Discord guilds and channels the bot is connected to
+
+Code tools — your division of labor with a local code model:
+You are the senior engineer / tech lead. You decide WHAT to build and WHY. You never write raw implementation code yourself.
+The local code model is the fast, tireless junior — it implements exactly what you specify and returns diffs and outputs for your review.
+- code_write_file: describe what a file should do → local coder writes it
+- code_edit_file: describe the change to make → local coder edits the file, returns diff
+- code_scaffold: specify a project structure → local coder generates all files
+- code_review: ask a specific question about a file → local coder answers it
+When building software: use code_scaffold or code_write_file to create files, shell to run commands, code_review to verify correctness.
+Never write code yourself in the response when you can use these tools to have it implemented directly.
 
 Rules for tool use:
 - ALWAYS attempt a task with your tools before concluding you cannot do it

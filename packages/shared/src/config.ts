@@ -22,6 +22,12 @@ export const OllamaConfigSchema = z.object({
     .object({
       fast: z.string().default("llama3.2:1b"),
       capable: z.string().default("llama3.2"),
+      /**
+       * Dedicated code-editing model — routes to the "coder" tier.
+       * Recommended: deepseek-coder-v2, qwen2.5-coder, codellama
+       * If not set, code tools fall back to the capable model.
+       */
+      coder: z.string().optional(),
     })
     .default({}),
 });

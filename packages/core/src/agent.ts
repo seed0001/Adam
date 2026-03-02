@@ -16,6 +16,9 @@ import { Planner } from "./planner.js";
 import { Executor, type ToolRegistry } from "./executor.js";
 import type { TaskQueue } from "./queue.js";
 import type { PersonalityStore } from "./personality.js";
+import type { ScratchpadStore } from "./scratchpad.js";
+import { SkillWorkshop, isWorkshopTrigger, formatSkillSummary } from "./workshop.js";
+import type { SkillStore } from "@adam/skills";
 
 const logger = createLogger("core:agent");
 
@@ -36,6 +39,8 @@ export class Agent {
   private executor: Executor;
   private readonly startedAt: Date = new Date();
 
+  private workshop: SkillWorkshop | null = null;
+
   constructor(
     private router: ModelRouter,
     private queue: TaskQueue,
@@ -44,10 +49,15 @@ export class Agent {
     private config: AgentConfig,
     private profile: ProfileStore | null = null,
     private personality: PersonalityStore | null = null,
+    private scratchpad: ScratchpadStore | null = null,
+    skillStore: SkillStore | null = null,
   ) {
     this.classifier = new IntentClassifier(router);
     this.planner = new Planner(router);
     this.executor = new Executor(router, queue, tools);
+    if (skillStore) {
+      this.workshop = new SkillWorkshop(router, skillStore);
+    }
   }
 
   async process(message: InboundMessage): Promise<Result<OutboundMessage, AdamError>> {
@@ -62,11 +72,36 @@ export class Agent {
       importance: 0.6,
     });
 
+    // Workshop mode — detect skill design intent and route to the architect layer
+    if (this.workshop && isWorkshopTrigger(message.content)) {
+      const workshopResult = await this.runWorkshop(message);
+      if (workshopResult.isOk()) {
+        this.episodic.insert({
+          sessionId: message.sessionId,
+          role: "assistant",
+          content: workshopResult.value,
+          source: "internal",
+          taskId: undefined,
+          importance: 0.9,
+        });
+        return ok({
+          sessionId: message.sessionId,
+          channelId: message.channelId,
+          source: message.source,
+          content: workshopResult.value,
+          voiceProfileId: null,
+          replyToId: message.id,
+          metadata: { workshopMode: true },
+        });
+      }
+      // If workshop fails, fall through to normal processing
+    }
+
     const classifyResult = await this.classifier.classify(message.content, message.sessionId);
     if (classifyResult.isErr()) return err(classifyResult.error);
 
     const { requiresPlanning, tier } = classifyResult.value;
-    const modelTier = tier === "embedding" ? ("capable" as const) : tier;
+    const modelTier = (tier === "embedding" || tier === "coder") ? ("capable" as const) : tier;
 
     let responseText: string;
 
@@ -89,9 +124,10 @@ export class Agent {
       importance: 0.5,
     });
 
-    // Fire-and-forget: extract user facts and update personality in the background
+    // Fire-and-forget: extract user facts, update personality, update scratchpad
     void this.extractAndStoreProfileFacts(message.content, responseText, message.sessionId);
     void this.maybeUpdatePersonality(message.content, message.sessionId);
+    void this.maybeUpdateScratchpad(message.content, responseText, message.sessionId);
 
     const outbound: OutboundMessage = {
       sessionId: message.sessionId,
@@ -108,7 +144,7 @@ export class Agent {
 
   private async directResponse(
     message: InboundMessage,
-    tier: "fast" | "capable",
+    tier: "fast" | "capable" | "coder",
   ): Promise<Result<string, AdamError>> {
     // Current session — full recent history
     const currentHistory = this.episodic
@@ -355,6 +391,94 @@ Rules:
       if (response.includes("#") || response.includes("##") || response.length > 100) {
         this.personality.save(response);
         logger.info("Personality profile updated from conversation");
+      }
+    } catch {
+      // best-effort — never throw
+    }
+  }
+
+  /**
+   * After each exchange, Adam decides whether anything is worth jotting on the scratchpad.
+   * If so, it rewrites the scratchpad with the current topic, any stray ideas, open questions.
+   * Fire-and-forget — never blocks a response.
+   */
+  private async runWorkshop(
+    message: InboundMessage,
+  ): Promise<Result<string, AdamError>> {
+    if (!this.workshop) {
+      return err(adamError("agent:no-workshop", "Workshop not initialized"));
+    }
+
+    // Check if this is a refinement ("change the X", "update the skill", etc.)
+    const lower = message.content.toLowerCase();
+    const isRefinement = (
+      lower.includes("change") ||
+      lower.includes("update the skill") ||
+      lower.includes("refine") ||
+      lower.includes("modify") ||
+      lower.includes("adjust")
+    );
+
+    // Try to find the most recent draft skill for refinement
+    if (isRefinement) {
+      // This is handled in the CLI/web layer where the draft ID is tracked
+      // For now, fall through to drafting a new one
+    }
+
+    try {
+      const { summary } = await this.workshop.draft(message.content, message.sessionId);
+      const intro = `I've drafted a skill spec based on your description. Here's the contract:\n\n`;
+      return ok(intro + summary);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return err(adamError("agent:workshop-failed", msg, e));
+    }
+  }
+
+  private async maybeUpdateScratchpad(
+    userMessage: string,
+    agentResponse: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (!this.scratchpad) return;
+
+    const current = this.scratchpad.load() ?? "(empty)";
+
+    try {
+      const result = await this.router.generate({
+        sessionId,
+        tier: "fast",
+        system: `You maintain a terse running scratchpad for yourself — an AI agent.
+
+The scratchpad has three sections. Keep each entry SHORT (5-10 words max).
+
+## Topic
+[single phrase describing what you're currently engaged with]
+
+## Ideas
+- [a loose idea — could be related or unrelated to the conversation]
+
+## Questions
+- [something you're genuinely curious about or wondering]
+
+Rules:
+- Only update sections that have new content worth noting
+- Don't echo back what the user said — write YOUR thoughts
+- Minimum 1 entry per section if anything has changed
+- If nothing genuinely new warrants an update, return exactly: NO_UPDATE
+- Return the full updated scratchpad (all 3 sections) if you update anything`,
+        prompt: `Current scratchpad:\n${current}\n\n---\nUser: ${userMessage}\nYou: ${agentResponse.slice(0, 400)}\n\nUpdate the scratchpad if warranted. Return NO_UPDATE or the full updated scratchpad.`,
+      });
+
+      if (result.isErr()) return;
+
+      const response = result.value.trim();
+      if (response === "NO_UPDATE" || response.startsWith("NO_UPDATE")) return;
+
+      // Sanity check — must look like a structured document
+      if (response.includes("## Topic") && response.length > 40) {
+        this.scratchpad.save(response);
+        logger.info("Scratchpad updated");
       }
     } catch {
       // best-effort — never throw

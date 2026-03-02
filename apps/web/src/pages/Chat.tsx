@@ -109,14 +109,19 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [agentName, setAgentName] = useState("Adam");
+  const [activeModel, setActiveModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sessionId = useRef(getSessionId());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    // Fetch agent name from status
-    api.getStatus().then((s) => setAgentName(s.agentName)).catch(() => {});
+    api.getStatus().then((s) => {
+      setAgentName(s.agentName);
+      // Show the capable model — that's what answers most messages
+      const model = s.activeModels?.capable ?? s.activeModels?.fast ?? null;
+      setActiveModel(model);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -173,7 +178,10 @@ export default function Chat() {
               <span className="text-accent font-bold text-sm">A</span>
             </div>
             <p className="text-zinc-500 text-sm">{agentName} is ready.</p>
-            <p className="text-zinc-700 text-xs">Shift+Enter for new line</p>
+            {activeModel && (
+              <p className="text-zinc-700 text-xs font-mono">{activeModel}</p>
+            )}
+            <p className="text-zinc-700 text-xs mt-1">Shift+Enter for new line</p>
           </div>
         )}
 
@@ -217,9 +225,14 @@ export default function Chat() {
             </svg>
           </button>
         </div>
-        <p className="text-center text-[10px] text-zinc-700 mt-2">
-          Adam has access to your file system and shell. Confirm before destructive actions.
-        </p>
+        <div className="flex items-center justify-between mt-2 px-1">
+          <p className="text-[10px] text-zinc-700">
+            File system · shell access. Confirm before destructive actions.
+          </p>
+          {activeModel && (
+            <p className="text-[10px] text-zinc-600 font-mono">{activeModel}</p>
+          )}
+        </div>
       </div>
     </div>
   );

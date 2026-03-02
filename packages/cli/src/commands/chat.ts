@@ -20,7 +20,8 @@ import {
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator } from "@adam/core";
+import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator, ScratchpadStore } from "@adam/core";
+import { SkillStore, createCodeTools, type SkillSpec } from "@adam/skills";
 import {
   webFetchTool,
   readFileTool,
@@ -68,8 +69,11 @@ export function registerChatCommand(program: Command): void {
       }).start();
 
       let agent: Agent;
+      let router!: ModelRouter;
       let profile!: ProfileStore;
       let personality!: PersonalityStore;
+      let scratchpad!: ScratchpadStore;
+      let skillStore!: SkillStore;
       let consolidator!: MemoryConsolidator;
 
       try {
@@ -81,6 +85,8 @@ export function registerChatCommand(program: Command): void {
         const episodic = new EpisodicStore(drizzleDb);
         profile = new ProfileStore(drizzleDb);
         personality = new PersonalityStore(config.daemon.agentName);
+        scratchpad = new ScratchpadStore();
+        skillStore = new SkillStore();
 
         const poolConfig = await buildModelPool(config);
 
@@ -97,7 +103,7 @@ export function registerChatCommand(program: Command): void {
         }
 
         const registry = new ProviderRegistry(poolConfig);
-        const router = new ModelRouter(
+        router = new ModelRouter(
           registry,
           config.budget,
           (usage) => {
@@ -127,10 +133,14 @@ export function registerChatCommand(program: Command): void {
           ["shell", shellTool],
         ]);
 
+        // Code tools — cloud model plans, local coder model implements
+        const codeTools = createCodeTools(router, generateSessionId());
+        for (const [name, t] of codeTools) tools.set(name, t);
+
         agent = new Agent(router, queue, episodic, tools, {
           systemPrompt: buildSystemPrompt(config),
           name: config.daemon.agentName,
-        }, profile, personality);
+        }, profile, personality, scratchpad, skillStore);
 
         // Stochastic memory consolidator — runs in the background during CLI sessions too
         consolidator = new MemoryConsolidator(profile, episodic, router, {
@@ -169,7 +179,7 @@ export function registerChatCommand(program: Command): void {
       console.log("");
 
       // ── Chat REPL ─────────────────────────────────────────────────────────────
-      await runRepl(chalk, ora, agent, config, profile, personality, consolidator);
+      await runRepl(chalk, ora, agent, router, config, profile, personality, scratchpad, skillStore, consolidator);
     });
 }
 
@@ -179,14 +189,31 @@ async function runRepl(
   chalk: Chalk,
   ora: typeof import("ora").default,
   agent: Agent,
+  router: ModelRouter,
   config: AdamConfig,
   profile: ProfileStore,
   personality: PersonalityStore,
+  scratchpad: ScratchpadStore,
+  skills: SkillStore,
   consolidator: MemoryConsolidator,
 ): Promise<void> {
   const sessionId = generateSessionId();
   const agentName = config.daemon.agentName;
+
+  // Read the active model from the actual vault-verified pool, not config flags.
+  // pool.capable[0] is what answers chat; pool.fast[0] is what handles background tasks.
+  const activeModelLabel = (() => {
+    const pool = router.getPool();
+    const entry = pool.capable[0] ?? pool.fast[0];
+    if (!entry) return null;
+    const provider = entry.type === "cloud" || entry.type === "local"
+      ? (entry as { provider: string }).provider
+      : entry.type;
+    return `${provider}/${entry.model}`;
+  })();
+
   const agentLabel = chalk.bold.cyan(`${agentName.toLowerCase()} ›`);
+  const modelTag = activeModelLabel ? chalk.gray(` [${activeModelLabel}]`) : "";
   const userLabel = chalk.bold.white("you ›");
 
   const rl = createInterface({
@@ -209,6 +236,13 @@ async function runRepl(
     `  ${chalk.white("/unprotect <key>")}            — allow a memory to decay naturally`,
     `  ${chalk.white("/personality")}                — view Adam's personality profile`,
     `  ${chalk.white("/personality reset")}          — reset personality to defaults`,
+    `  ${chalk.white("/pad")}                        — view Adam's scratchpad (topic, ideas, questions)`,
+    `  ${chalk.white("/pad clear")}                  — wipe the scratchpad`,
+    `  ${chalk.white("/workshop")}                   — list all skill specs`,
+    `  ${chalk.white("/workshop show <id>")}         — view a skill spec`,
+    `  ${chalk.white("/workshop approve <id>")}      — approve a draft spec`,
+    `  ${chalk.white("/workshop latent <id>")}       — mark spec as latent (simulate only)`,
+    `  ${chalk.white("/workshop deprecate <id>")}    — retire a skill`,
     `  ${chalk.white("/clear")}                      — clear the screen`,
     `  ${chalk.white("/exit")}                       — end the session`,
     "",
@@ -415,6 +449,121 @@ async function runRepl(
       return;
     }
 
+    if (input.startsWith("/pad")) {
+      const arg = input.slice("/pad".length).trim();
+      if (arg === "clear") {
+        const { unlinkSync, existsSync } = await import("node:fs");
+        if (existsSync(scratchpad.path)) unlinkSync(scratchpad.path);
+        console.log(chalk.yellow("\n  Scratchpad cleared.\n"));
+      } else {
+        const content = scratchpad.load();
+        if (!content) {
+          console.log(chalk.gray("\n  Scratchpad is empty — Adam hasn't written anything yet.\n"));
+        } else {
+          console.log("");
+          console.log(chalk.bold("  Scratchpad") + chalk.gray(`  (${scratchpad.path})`));
+          console.log(chalk.gray("  ─────────────────────────────────────────────────"));
+          const lines = content.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("## ")) {
+              console.log(chalk.bold.cyan(`  ${line}`));
+            } else if (line.startsWith("- ") || line.startsWith("* ")) {
+              console.log(chalk.gray("  ") + chalk.white(line));
+            } else if (line.startsWith("*Updated")) {
+              console.log(chalk.gray(`  ${line}`));
+            } else if (line.startsWith("---")) {
+              console.log(chalk.gray(`  ${line}`));
+            } else {
+              console.log(`  ${line}`);
+            }
+          }
+          console.log("");
+        }
+      }
+      ask();
+      return;
+    }
+
+    if (input.startsWith("/workshop")) {
+      const parts = input.slice("/workshop".length).trim().split(/\s+/);
+      const sub = parts[0] ?? "";
+      const id = parts[1] ?? "";
+
+      const printSkill = (skill: SkillSpec) => {
+        const statusColors: Record<string, (s: string) => string> = {
+          draft: chalk.yellow,
+          approved: chalk.blue,
+          latent: chalk.gray,
+          active: chalk.green,
+          deprecated: chalk.gray,
+        };
+        const col = statusColors[skill.status] ?? chalk.white;
+        console.log("");
+        console.log(chalk.bold(`  ${skill.displayName}`) + chalk.gray(`  ${skill.id}`));
+        console.log(`  ${col(`[${skill.status.toUpperCase()}]`)}  v${skill.version}`);
+        console.log(chalk.gray("  ─────────────────────────────────────────────────────"));
+        console.log(chalk.gray("  ") + skill.description);
+        console.log("");
+        console.log(chalk.bold("  Triggers: ") + skill.triggers.slice(0, 3).map((t) => `"${t}"`).join("  "));
+        console.log(chalk.bold("  Tools:    ") + (skill.allowedTools.join(", ") || "none"));
+        console.log("");
+        console.log(chalk.bold("  Steps:"));
+        skill.steps.forEach((s, i) => console.log(chalk.gray(`    ${i + 1}.`) + `  ${s}`));
+        console.log("");
+        console.log(chalk.bold("  Must never:"));
+        skill.constraints.forEach((c) => console.log(chalk.red("    ✗") + `  ${c}`));
+        console.log("");
+        if (skill.status === "draft") {
+          console.log(chalk.yellow(`  To approve: /workshop approve ${skill.id}`));
+          console.log(chalk.gray(`  To mark latent: /workshop latent ${skill.id}`));
+        }
+        console.log("");
+      };
+
+      if (!sub) {
+        // List all skills
+        const all = skills.list();
+        if (all.length === 0) {
+          console.log(chalk.gray("\n  No skills yet. Say \"let's design a skill\" to start a workshop session.\n"));
+        } else {
+          console.log("");
+          const byStatus: Record<string, SkillSpec[]> = {};
+          for (const s of all) {
+            (byStatus[s.status] ??= []).push(s);
+          }
+          for (const status of ["draft", "approved", "latent", "active", "deprecated"]) {
+            const group = byStatus[status];
+            if (!group?.length) continue;
+            console.log(chalk.bold.gray(`  ${status.toUpperCase()}`));
+            for (const s of group) {
+              console.log(`    ${chalk.white(s.displayName.padEnd(30))} ${chalk.gray(s.id)}`);
+            }
+            console.log("");
+          }
+        }
+      } else if (sub === "show" && id) {
+        const skill = skills.get(id);
+        if (!skill) console.log(chalk.red(`\n  Skill not found: ${id}\n`));
+        else printSkill(skill);
+      } else if (sub === "approve" && id) {
+        const updated = skills.approve(id);
+        if (!updated) console.log(chalk.red(`\n  Cannot approve — not found or not a draft.\n`));
+        else { console.log(chalk.green(`\n  ✓ Spec approved.\n`)); printSkill(updated); }
+      } else if (sub === "latent" && id) {
+        const updated = skills.makeLatent(id);
+        if (!updated) console.log(chalk.red(`\n  Cannot mark latent — not found or wrong state.\n`));
+        else console.log(chalk.gray(`\n  Marked latent. Adam can simulate this skill but not execute it.\n`));
+      } else if (sub === "deprecate" && id) {
+        const updated = skills.deprecate(id);
+        if (!updated) console.log(chalk.red(`\n  Skill not found: ${id}\n`));
+        else console.log(chalk.gray(`\n  Skill deprecated.\n`));
+      } else {
+        console.log(chalk.gray("\n  Usage: /workshop  /workshop show <id>  /workshop approve <id>\n"));
+      }
+      ask();
+      return;
+    }
+
     // Pause readline so spinner output doesn't interleave with user input
     rl.pause();
     process.stdout.write("\n");
@@ -447,7 +596,8 @@ async function runRepl(
       const formatted = lines
         .map((line, i) => (i === 0 ? `${agentLabel} ${line}` : `${indent}${line}`))
         .join("\n");
-      console.log(formatted + "\n");
+      console.log(formatted);
+      console.log(modelTag ? `${indent}${modelTag}\n` : "");
     } else {
       console.log(chalk.red(`  ✖  ${result.error.message}\n`));
     }
@@ -473,6 +623,7 @@ async function runRepl(
 async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   const fast: ProviderConfig[] = [];
   const capable: ProviderConfig[] = [];
+  const coder: ProviderConfig[] = [];
 
   const cloudProviders = [
     "anthropic",
@@ -512,12 +663,10 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   if (config.providers.ollama.enabled) {
     const { models, baseUrl } = config.providers.ollama;
     fast.push({ type: "local", provider: "ollama", model: models.fast, baseUrl });
-    capable.push({
-      type: "local",
-      provider: "ollama",
-      model: models.capable,
-      baseUrl,
-    });
+    capable.push({ type: "local", provider: "ollama", model: models.capable, baseUrl });
+    if (models.coder) {
+      coder.push({ type: "local", provider: "ollama", model: models.coder, baseUrl });
+    }
   }
 
   if (config.providers.lmstudio.enabled) {
@@ -573,7 +722,7 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
     },
   ];
 
-  return { fast, capable, embedding };
+  return { fast, capable, coder, embedding };
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
@@ -618,6 +767,16 @@ Tools you have right now — use them:
 - write_file: write or create any file on this machine
 - list_directory: list files and folders at any path
 - shell: run any shell command on this machine
+
+Code tools — your division of labor with a local code model:
+You are the senior engineer / tech lead. You decide WHAT to build and WHY. You never write raw implementation code yourself.
+The local code model is the fast, tireless junior — it implements exactly what you specify and returns diffs and outputs for your review.
+- code_write_file: describe what a file should do → local coder writes it
+- code_edit_file: describe the change to make → local coder edits the file, returns diff
+- code_scaffold: specify a project structure → local coder generates all files
+- code_review: ask a specific question about a file → local coder answers it
+When building software: use code_scaffold or code_write_file to create files, shell to run commands, code_review to verify correctness.
+Never write code yourself in the response when you can use these tools to have it implemented directly.
 
 Rules for tool use:
 - ALWAYS attempt a task with your tools before concluding you cannot do it

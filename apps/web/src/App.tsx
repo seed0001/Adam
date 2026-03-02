@@ -4,12 +4,16 @@ import Memory from "./pages/Memory";
 import Status from "./pages/Status";
 import Settings from "./pages/Settings";
 import Providers from "./pages/Providers";
+import Scratchpad from "./pages/Scratchpad";
+import Skills from "./pages/Skills";
 
-type Tab = "chat" | "memory" | "providers" | "settings" | "status";
+type Tab = "chat" | "memory" | "scratchpad" | "skills" | "providers" | "settings" | "status";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "chat", label: "Chat" },
   { id: "memory", label: "Memory" },
+  { id: "scratchpad", label: "Scratch Pad" },
+  { id: "skills", label: "Skills" },
   { id: "providers", label: "Providers" },
   { id: "settings", label: "Settings" },
   { id: "status", label: "Status" },
@@ -52,6 +56,8 @@ export default function App() {
       <main className="flex-1 min-h-0">
         {tab === "chat" && <Chat />}
         {tab === "memory" && <Memory />}
+        {tab === "scratchpad" && <Scratchpad />}
+        {tab === "skills" && <Skills />}
         {tab === "providers" && <Providers />}
         {tab === "settings" && <Settings />}
         {tab === "status" && <Status />}

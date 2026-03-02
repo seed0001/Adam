@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const ModelTierSchema = z.enum(["fast", "capable", "embedding"]);
+export const ModelTierSchema = z.enum(["fast", "capable", "coder", "embedding"]);
 export type ModelTier = z.infer<typeof ModelTierSchema>;
 
 export const ProviderTypeSchema = z.enum(["cloud", "local", "huggingface"]);
