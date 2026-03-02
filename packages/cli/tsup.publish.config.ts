@@ -3,7 +3,7 @@ import { defineConfig } from "tsup";
 /**
  * Publish build — bundles all @adam/* workspace packages inline.
  * Run: pnpm build:publish
- * Then:  npm publish (from packages/cli)
+ * Then: npm publish  (from packages/cli)
  */
 export default defineConfig({
   entry: {
@@ -14,25 +14,33 @@ export default defineConfig({
   bundle: true,
   clean: true,
   outDir: "dist",
-  // Keep native modules and large SDK deps as npm dependencies
+  // These are declared as npm dependencies and must NOT be inlined
   external: [
+    // Native / large — installed as npm deps
     "better-sqlite3",
     "keytar",
+    // AI SDK
     "ai",
     "@ai-sdk/anthropic",
     "@ai-sdk/openai",
     "@ai-sdk/google",
     "@ai-sdk/groq",
     "@ai-sdk/mistral",
-    "@huggingface/inference",
+    "@ai-sdk/deepseek",
+    "@openrouter/ai-sdk-provider",
     "@huggingface/transformers",
-    "discord.js",
-    "node-telegram-bot-api",
+    // ORM
     "drizzle-orm",
+    // Adapters
+    "discord.js",
+    "grammy",
+    // Utilities declared as deps
     "zod",
     "neverthrow",
+    // Node built-ins
     /^node:/,
   ],
+  // All @adam/* workspace packages are inlined — they aren't published separately
   noExternal: [
     "@adam/shared",
     "@adam/security",
