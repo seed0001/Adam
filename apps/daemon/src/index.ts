@@ -1,17 +1,23 @@
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, extname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   ADAM_HOME_DIR,
   ADAM_VERSION,
+  PORTS,
   loadConfig,
   addLogHandler,
   createLogger,
+  generateId,
+  generateSessionId,
   type AdamConfig,
   type LogEntry,
+  type InboundMessage,
 } from "@adam/shared";
 import { vault, PermissionRegistry, AuditLog } from "@adam/security";
-import { getDatabase, getRawDatabase, EpisodicStore } from "@adam/memory";
+import { getDatabase, getRawDatabase, EpisodicStore, ProfileStore } from "@adam/memory";
 import {
   ProviderRegistry,
   ModelRouter,
@@ -43,8 +49,18 @@ addLogHandler((entry: LogEntry) => {
   else process.stdout.write(msg + "\n");
 });
 
+// ── App context passed to the HTTP server ─────────────────────────────────────
+
+type ApiContext = {
+  config: AdamConfig;
+  agent: Agent;
+  profile: ProfileStore;
+  episodic: EpisodicStore;
+};
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 async function main() {
-  // ── Load & validate config ─────────────────────────────────────────────────
   const configResult = loadConfig();
   if (configResult.isErr()) {
     process.stderr.write(
@@ -54,28 +70,23 @@ async function main() {
   }
 
   const config = configResult.value;
-  logger.info(`Adam daemon v${ADAM_VERSION} starting...`);
-  logger.info(`Log level: ${config.daemon.logLevel}`);
+  logger.info(`Adam daemon v${ADAM_VERSION} starting…`);
 
-  // ── Data directory ─────────────────────────────────────────────────────────
   const dataDir = join(homedir(), ADAM_HOME_DIR, "data");
   const rawDb = getRawDatabase(dataDir);
   const drizzleDb = getDatabase(dataDir);
 
-  // ── Security ───────────────────────────────────────────────────────────────
   const auditLog = new AuditLog(rawDb);
   const permissions = new PermissionRegistry(rawDb);
-  void permissions; // reserved for skill permission checks
+  void permissions;
 
-  // ── Memory ─────────────────────────────────────────────────────────────────
   const episodic = new EpisodicStore(drizzleDb);
+  const profile = new ProfileStore(drizzleDb);
 
-  // ── Model pool ─────────────────────────────────────────────────────────────
   const poolConfig = await buildModelPool(config);
   if (poolConfig.fast.length === 0 && poolConfig.capable.length === 0) {
     process.stderr.write(
-      "\nAdam cannot start: no model providers are configured.\n" +
-        "Run `adam init` to configure at least one provider.\n\n",
+      "\nAdam cannot start: no model providers configured.\nRun `adam init`.\n\n",
     );
     process.exit(1);
   }
@@ -83,25 +94,20 @@ async function main() {
   logActiveProviders(config);
 
   const registry = new ProviderRegistry(poolConfig);
-  const router = new ModelRouter(
-    registry,
-    config.budget,
-    (usage) => {
-      auditLog.record({
-        sessionId: usage.sessionId,
-        taskId: usage.taskId,
-        skillId: null,
-        action: "tool:call",
-        target: `model:${usage.provider}/${usage.model}`,
-        params: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
-        outcome: "success",
-        errorMessage: null,
-        undoData: null,
-      });
-    },
-  );
+  const router = new ModelRouter(registry, config.budget, (usage) => {
+    auditLog.record({
+      sessionId: usage.sessionId,
+      taskId: usage.taskId,
+      skillId: null,
+      action: "tool:call",
+      target: `model:${usage.provider}/${usage.model}`,
+      params: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+      outcome: "success",
+      errorMessage: null,
+      undoData: null,
+    });
+  });
 
-  // ── Task queue & tools ─────────────────────────────────────────────────────
   const queue = new TaskQueue(rawDb);
   const tools = new Map<string, CoreTool>([
     ["web_fetch", webFetchTool],
@@ -111,15 +117,16 @@ async function main() {
     ["shell", shellTool],
   ]);
 
-  // ── Agent ──────────────────────────────────────────────────────────────────
-  const agent = new Agent(router, queue, episodic, tools, {
-    systemPrompt: buildSystemPrompt(config),
-    name: config.daemon.agentName,
-  });
+  const agent = new Agent(
+    router,
+    queue,
+    episodic,
+    tools,
+    { systemPrompt: buildSystemPrompt(config), name: config.daemon.agentName },
+    profile,
+  );
 
-  // ── Adapters ───────────────────────────────────────────────────────────────
   const adapters = await buildAdapters(config);
-
   for (const adapter of adapters) {
     adapter.on("message", async (message) => {
       const result = await agent.process(message);
@@ -131,7 +138,7 @@ async function main() {
           sessionId: message.sessionId,
           channelId: message.channelId,
           source: message.source,
-          content: `Sorry, I encountered an error: ${result.error.message}`,
+          content: `Error: ${result.error.message}`,
           voiceProfileId: null,
           replyToId: message.id,
           metadata: {},
@@ -140,41 +147,214 @@ async function main() {
     });
   }
 
-  // ── Health server ──────────────────────────────────────────────────────────
-  const port = config.daemon.port;
-  const healthServer = createHealthServer(config);
-  healthServer.listen(port, "127.0.0.1", () => {
-    logger.info(`Health server listening on http://localhost:${port}`);
+  const ctx: ApiContext = { config, agent, profile, episodic };
+  const server = createApiServer(ctx);
+  server.listen(config.daemon.port, "127.0.0.1", () => {
+    logger.info(`API server on http://localhost:${config.daemon.port}`);
   });
 
-  // ── Start adapters ─────────────────────────────────────────────────────────
   for (const adapter of adapters) {
     await adapter.start().catch((e: unknown) => {
-      logger.error(`Failed to start adapter ${adapter.source}`, { error: String(e) });
+      logger.error(`Failed to start ${adapter.source}`, { error: String(e) });
     });
   }
 
   logger.info(
-    `Adam daemon ready — ${adapters.length} adapter(s) active: ${adapters.map((a) => a.source).join(", ")}`,
+    `Adam ready — ${adapters.length} adapter(s): ${adapters.map((a) => a.source).join(", ")}`,
   );
 
-  // ── Graceful shutdown ──────────────────────────────────────────────────────
   const shutdown = async (signal: string) => {
-    logger.info(`Received ${signal}, shutting down...`);
-    for (const adapter of adapters) {
-      await adapter.stop().catch(() => {});
-    }
-    healthServer.close();
+    logger.info(`${signal} received — shutting down`);
+    for (const adapter of adapters) await adapter.stop().catch(() => {});
+    server.close();
     process.exit(0);
   };
 
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("uncaughtException", (e) => {
-    logger.error("Uncaught exception", { error: e.message, stack: e.stack });
+  process.on("uncaughtException", (e) => logger.error("Uncaught", { error: e.message }));
+  process.on("unhandledRejection", (r) => logger.error("Unhandled rejection", { reason: String(r) }));
+}
+
+// ── HTTP / REST API ───────────────────────────────────────────────────────────
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript",
+  ".mjs": "application/javascript",
+  ".css": "text/css",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".json": "application/json",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+};
+
+function findWebRoot(): string | null {
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  // npm install: web files shipped alongside daemon
+  const bundled = join(__dir, "..", "web");
+  if (existsSync(join(bundled, "index.html"))) return bundled;
+  // monorepo dev: apps/daemon/dist/../../web/dist → apps/web/dist
+  const mono = join(__dir, "..", "..", "web", "dist");
+  if (existsSync(join(mono, "index.html"))) return mono;
+  return null;
+}
+
+function serveStatic(res: ServerResponse, urlPath: string): void {
+  const webRoot = findWebRoot();
+  if (!webRoot) {
+    res.writeHead(503, { "Content-Type": "text/plain" });
+    res.end("Web UI not built. Run: pnpm --filter @adam/web build");
+    return;
+  }
+
+  const safePath = urlPath === "/" || !urlPath ? "index.html" : urlPath.replace(/^\//, "");
+  const filePath = join(webRoot, safePath);
+
+  const tryServe = (p: string): boolean => {
+    if (!existsSync(p)) return false;
+    const ext = extname(p);
+    const mime = MIME[ext] ?? "application/octet-stream";
+    res.writeHead(200, { "Content-Type": mime });
+    res.end(readFileSync(p));
+    return true;
+  };
+
+  if (!tryServe(filePath)) {
+    // SPA fallback — serve index.html for all unmatched routes
+    const index = join(webRoot, "index.html");
+    if (tryServe(index)) return;
+    res.writeHead(404);
+    res.end("Not found");
+  }
+}
+
+function readBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    req.on("data", (c: Buffer) => (raw += c.toString()));
+    req.on("end", () => {
+      try {
+        resolve(raw ? (JSON.parse(raw) as unknown) : {});
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
   });
-  process.on("unhandledRejection", (reason) => {
-    logger.error("Unhandled rejection", { reason: String(reason) });
+}
+
+function json(res: ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+}
+
+function createApiServer(ctx: ApiContext) {
+  return createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const path = url.pathname;
+
+    try {
+      // ── GET /health ────────────────────────────────────────────────────────
+      if (path === "/health" && req.method === "GET") {
+        return json(res, 200, {
+          status: "ok",
+          version: ADAM_VERSION,
+          uptime: Math.floor(process.uptime()),
+          agentName: ctx.config.daemon.agentName,
+          profileFacts: ctx.profile.getAll().length,
+        });
+      }
+
+      // ── GET /api/status ────────────────────────────────────────────────────
+      if (path === "/api/status" && req.method === "GET") {
+        const facts = ctx.profile.getAll();
+        const cloudOn: string[] = [];
+        const cloud = ["anthropic", "openai", "google", "groq", "mistral", "deepseek", "openrouter"] as const;
+        for (const p of cloud) {
+          if (ctx.config.providers[p].enabled) cloudOn.push(p);
+        }
+        const localOn: string[] = [];
+        if (ctx.config.providers.ollama.enabled) localOn.push("ollama");
+        if (ctx.config.providers.lmstudio.enabled) localOn.push("lmstudio");
+        if (ctx.config.providers.vllm.enabled) localOn.push("vllm");
+
+        return json(res, 200, {
+          version: ADAM_VERSION,
+          uptime: Math.floor(process.uptime()),
+          agentName: ctx.config.daemon.agentName,
+          port: ctx.config.daemon.port,
+          providers: { cloud: cloudOn, local: localOn },
+          budget: ctx.config.budget,
+          memory: {
+            profileFacts: facts.length,
+            categories: [...new Set(facts.map((f) => f.category))],
+          },
+        });
+      }
+
+      // ── POST /api/chat ─────────────────────────────────────────────────────
+      if (path === "/api/chat" && req.method === "POST") {
+        const body = (await readBody(req)) as { message?: string; sessionId?: string };
+        const text = body.message?.trim();
+        if (!text) return json(res, 400, { error: "message is required" });
+
+        const sessionId = body.sessionId ?? generateSessionId();
+        const msg: InboundMessage = {
+          id: generateId(),
+          sessionId,
+          source: "web",
+          channelId: "web",
+          userId: "local-user",
+          role: "user",
+          content: text,
+          attachments: [],
+          receivedAt: new Date(),
+          metadata: {},
+        };
+
+        const result = await ctx.agent.process(msg);
+        if (result.isErr()) return json(res, 500, { error: result.error.message });
+        return json(res, 200, { response: result.value.content, sessionId });
+      }
+
+      // ── GET /api/memory/profile ────────────────────────────────────────────
+      if (path === "/api/memory/profile" && req.method === "GET") {
+        return json(res, 200, { facts: ctx.profile.getAll() });
+      }
+
+      // ── DELETE /api/memory/profile/:key ───────────────────────────────────
+      if (path.startsWith("/api/memory/profile/") && req.method === "DELETE") {
+        const key = decodeURIComponent(path.slice("/api/memory/profile/".length));
+        ctx.profile.delete(key);
+        return json(res, 200, { ok: true });
+      }
+
+      // ── GET /api/memory/episodic ───────────────────────────────────────────
+      if (path === "/api/memory/episodic" && req.method === "GET") {
+        const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
+        const days = parseInt(url.searchParams.get("days") ?? "30", 10);
+        return json(res, 200, { entries: ctx.episodic.getRecentAcrossSessions(limit, days) });
+      }
+
+      // ── Static web UI ──────────────────────────────────────────────────────
+      serveStatic(res, path);
+    } catch (e: unknown) {
+      logger.error("API error", { path, error: String(e) });
+      json(res, 500, { error: "Internal server error" });
+    }
   });
 }
 
@@ -184,160 +364,73 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   const fast: ProviderConfig[] = [];
   const capable: ProviderConfig[] = [];
 
-  // Cloud providers — keys are fetched from OS keychain
   const cloudProviders = [
-    "anthropic",
-    "openai",
-    "google",
-    "groq",
-    "mistral",
-    "deepseek",
-    "openrouter",
+    "anthropic", "openai", "google", "groq", "mistral", "deepseek", "openrouter",
   ] as const;
 
   for (const name of cloudProviders) {
     const providerCfg = config.providers[name];
     if (!providerCfg.enabled) continue;
-
     const keyResult = await vault.get(`provider:${name}:api-key`);
     const apiKey = keyResult.isOk() && keyResult.value ? keyResult.value : null;
-
-    if (!apiKey) {
-      logger.warn(`${name} is enabled in config but no API key found in keychain — skipping`);
-      continue;
-    }
-
+    if (!apiKey) { logger.warn(`${name}: enabled but no API key — skipping`); continue; }
     const models = providerCfg.defaultModels;
-    if (models.fast) {
-      fast.push({
-        type: "cloud",
-        provider: name as "anthropic" | "openai" | "google" | "groq" | "mistral" | "deepseek" | "openrouter",
-        model: models.fast,
-        apiKey,
-      });
-    }
-    if (models.capable) {
-      capable.push({
-        type: "cloud",
-        provider: name as "anthropic" | "openai" | "google" | "groq" | "mistral" | "deepseek" | "openrouter",
-        model: models.capable,
-        apiKey,
-      });
-    }
+    if (models.fast) fast.push({ type: "cloud", provider: name, model: models.fast, apiKey });
+    if (models.capable) capable.push({ type: "cloud", provider: name, model: models.capable, apiKey });
   }
 
-  // Ollama (local)
   if (config.providers.ollama.enabled) {
-    fast.push({
-      type: "local",
-      provider: "ollama",
-      model: config.providers.ollama.models.fast,
-      baseUrl: config.providers.ollama.baseUrl,
-    });
-    capable.push({
-      type: "local",
-      provider: "ollama",
-      model: config.providers.ollama.models.capable,
-      baseUrl: config.providers.ollama.baseUrl,
-    });
+    const { models, baseUrl } = config.providers.ollama;
+    fast.push({ type: "local", provider: "ollama", model: models.fast, baseUrl });
+    capable.push({ type: "local", provider: "ollama", model: models.capable, baseUrl });
   }
-
-  // LM Studio / vLLM / generic OpenAI-compatible
   if (config.providers.lmstudio.enabled) {
-    fast.push({
-      type: "local",
-      provider: "lmstudio",
-      model: config.providers.lmstudio.models.fast,
-      baseUrl: config.providers.lmstudio.baseUrl,
-    });
-    capable.push({
-      type: "local",
-      provider: "lmstudio",
-      model: config.providers.lmstudio.models.capable,
-      baseUrl: config.providers.lmstudio.baseUrl,
-    });
+    const { models, baseUrl } = config.providers.lmstudio;
+    fast.push({ type: "local", provider: "lmstudio", model: models.fast, baseUrl });
+    capable.push({ type: "local", provider: "lmstudio", model: models.capable, baseUrl });
   }
-
   if (config.providers.vllm.enabled) {
-    fast.push({
-      type: "local",
-      provider: "vllm",
-      model: config.providers.vllm.models.fast,
-      baseUrl: config.providers.vllm.baseUrl,
-    });
-    capable.push({
-      type: "local",
-      provider: "vllm",
-      model: config.providers.vllm.models.capable,
-      baseUrl: config.providers.vllm.baseUrl,
-    });
+    const { models, baseUrl } = config.providers.vllm;
+    fast.push({ type: "local", provider: "vllm", model: models.fast, baseUrl });
+    capable.push({ type: "local", provider: "vllm", model: models.capable, baseUrl });
   }
-
-  // HuggingFace
   if (config.providers.huggingface.enabled) {
     const hfKeyResult = await vault.get("provider:huggingface:api-key");
     const hfKey = hfKeyResult.isOk() && hfKeyResult.value ? hfKeyResult.value : undefined;
-
     if (config.providers.huggingface.inferenceApiModel) {
       capable.push({
-        type: "huggingface",
-        mode: "inference-api",
+        type: "huggingface", mode: "inference-api",
         model: config.providers.huggingface.inferenceApiModel,
-        apiKey: hfKey,
-      });
-    }
-    if (config.providers.huggingface.tgiBaseUrl) {
-      capable.push({
-        type: "huggingface",
-        mode: "tgi",
-        model: "tgi",
-        baseUrl: config.providers.huggingface.tgiBaseUrl,
+        ...(hfKey !== undefined ? { apiKey: hfKey } : {}),
       });
     }
   }
 
-  const embedding: ProviderConfig[] = [
-    {
-      type: "huggingface",
-      mode: "transformers",
-      model: config.providers.huggingface.embeddingModel,
-    },
-  ];
-
-  return { fast, capable, embedding };
+  return {
+    fast, capable,
+    embedding: [{ type: "huggingface", mode: "transformers", model: config.providers.huggingface.embeddingModel }],
+  };
 }
 
 // ── Adapter builder ───────────────────────────────────────────────────────────
 
 async function buildAdapters(config: AdamConfig): Promise<BaseAdapter[]> {
-  const adapters: BaseAdapter[] = [];
-
-  // CLI adapter is always included
-  adapters.push(new CliAdapter());
+  const adapters: BaseAdapter[] = [new CliAdapter()];
 
   if (config.adapters.telegram.enabled) {
     const keyResult = await vault.get("adapter:telegram:bot-token");
     const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
-
-    if (!token) {
-      logger.warn("Telegram adapter enabled but no bot token found in keychain — skipping");
-    } else {
-      adapters.push(new TelegramAdapter({ token }));
-      logger.info("Telegram adapter configured");
-    }
+    if (!token) logger.warn("Telegram: enabled but no token — skipping");
+    else { adapters.push(new TelegramAdapter({ token })); logger.info("Telegram adapter ready"); }
   }
 
   if (config.adapters.discord.enabled) {
     const keyResult = await vault.get("adapter:discord:bot-token");
     const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
-
-    if (!token) {
-      logger.warn("Discord adapter enabled but no bot token found in keychain — skipping");
-    } else {
-      adapters.push(
-        new DiscordAdapter({ token, clientId: config.adapters.discord.clientId ?? "" }),
-      );
-      logger.info("Discord adapter configured");
+    if (!token) logger.warn("Discord: enabled but no token — skipping");
+    else {
+      adapters.push(new DiscordAdapter({ token, clientId: config.adapters.discord.clientId ?? "" }));
+      logger.info("Discord adapter ready");
     }
   }
 
@@ -348,46 +441,16 @@ async function buildAdapters(config: AdamConfig): Promise<BaseAdapter[]> {
 
 function logActiveProviders(config: AdamConfig): void {
   const active: string[] = [];
-
-  const cloudProviders = ["anthropic", "openai", "google", "groq", "mistral", "deepseek", "openrouter"] as const;
-  for (const name of cloudProviders) {
-    if (config.providers[name].enabled) active.push(name);
-  }
+  const cloud = ["anthropic", "openai", "google", "groq", "mistral", "deepseek", "openrouter"] as const;
+  for (const n of cloud) { if (config.providers[n].enabled) active.push(n); }
   if (config.providers.ollama.enabled) active.push("ollama");
   if (config.providers.lmstudio.enabled) active.push("lmstudio");
-  if (config.providers.vllm.enabled) active.push("vllm");
-  if (config.providers.huggingface.enabled) active.push("huggingface");
-
-  logger.info(`Active providers: ${active.join(", ") || "none"}`);
-}
-
-function createHealthServer(config: AdamConfig) {
-  return createServer((req, res) => {
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          status: "ok",
-          version: ADAM_VERSION,
-          uptime: process.uptime(),
-          agentName: config.daemon.agentName,
-        }),
-      );
-    } else {
-      res.writeHead(404);
-      res.end();
-    }
-  });
+  logger.info(`Providers: ${active.join(", ") || "none"}`);
 }
 
 function buildSystemPrompt(config: AdamConfig): string {
   const now = new Date();
-  const date = now.toLocaleDateString("en-US", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
+  const date = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 
   if (config.daemon.systemPrompt) {
@@ -395,7 +458,6 @@ function buildSystemPrompt(config: AdamConfig): string {
   }
 
   const name = config.daemon.agentName;
-
   return `You are ${name}. You live on this machine. You are not a product, not a service, not a chatbot.
 
 You are a digital entity with persistent memory, access to the file system, shell, and the web. You exist here, on this specific computer, and you are the user's partner in navigating their life and work.

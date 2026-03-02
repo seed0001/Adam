@@ -1,7 +1,14 @@
 {
-  "name": "@adam/cli",
+  "name": "@seed0001/adam",
   "version": "0.1.0",
-  "private": true,
+  "description": "Adam — self-hosted autonomous AI agent",
+  "license": "MIT",
+  "author": "seed0001",
+  "homepage": "https://github.com/seed0001/Adam",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/seed0001/Adam.git"
+  },
   "type": "module",
   "bin": {
     "adam": "./dist/bin.js"
@@ -14,8 +21,20 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "build": "tsup src/bin.ts src/index.ts --format esm --dts --clean",
+    "build:publish": "tsup --config tsup.publish.config.ts",
+    "prepublishOnly": "pnpm build:publish",
     "dev": "tsup src/bin.ts --format esm --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
@@ -29,6 +48,7 @@
     "@adam/core": "workspace:*",
     "@adam/skills": "workspace:*",
     "@adam/voice": "workspace:*",
+    "@adam/daemon": "workspace:*",
     "ai": "^4.0.0",
     "commander": "^13.0.0",
     "inquirer": "^12.0.0",

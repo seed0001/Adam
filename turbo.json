@@ -27,6 +27,11 @@
     },
     "clean": {
       "cache": false
+    },
+    "preview": {
+      "dependsOn": ["build"],
+      "persistent": true,
+      "cache": false
     }
   }
 }

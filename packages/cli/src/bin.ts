@@ -5,6 +5,8 @@ import { registerInitCommand } from "./commands/init.js";
 import { registerChatCommand } from "./commands/chat.js";
 import { registerVoiceCommands } from "./commands/voice.js";
 import { registerStatusCommands } from "./commands/status.js";
+import { registerStartCommand } from "./commands/start.js";
+import { registerStopCommand } from "./commands/stop.js";
 
 program
   .name("adam")
@@ -15,14 +17,7 @@ registerInitCommand(program);
 registerChatCommand(program);
 registerVoiceCommands(program);
 registerStatusCommands(program);
-
-program
-  .command("start")
-  .description("Start the Adam daemon")
-  .action(async () => {
-    const { default: chalk } = await import("chalk");
-    console.warn(chalk.cyan("Starting Adam daemon..."));
-    console.warn(chalk.gray("Run from apps/daemon: pnpm dev"));
-  });
+registerStartCommand(program);
+registerStopCommand(program);
 
 program.parse(process.argv);
