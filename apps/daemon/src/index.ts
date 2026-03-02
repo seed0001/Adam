@@ -490,6 +490,7 @@ function createApiServer(ctx: ApiContext) {
           "provider:openai:api-key",
           "provider:google:api-key",
           "provider:groq:api-key",
+          "provider:xai:api-key",
           "provider:mistral:api-key",
           "provider:deepseek:api-key",
           "provider:openrouter:api-key",
