@@ -73,6 +73,15 @@ function runMigrations(sqlite: BetterSQLite3.Database): void {
     CREATE INDEX IF NOT EXISTS idx_profile_key       ON profile_memory(key);
     CREATE INDEX IF NOT EXISTS idx_sessions_source   ON sessions(source);
   `);
+
+  // Additive migrations — safe to run repeatedly (SQLite ignores duplicate columns via try/catch)
+  const addColumns = [
+    `ALTER TABLE profile_memory ADD COLUMN last_referenced_at TEXT`,
+    `ALTER TABLE profile_memory ADD COLUMN protected INTEGER NOT NULL DEFAULT 0`,
+  ];
+  for (const sql of addColumns) {
+    try { sqlite.exec(sql); } catch { /* column already exists */ }
+  }
 }
 
 export function getDatabase(dataDir?: string): AdamDB {

@@ -20,7 +20,7 @@ import {
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue, PersonalityStore } from "@adam/core";
+import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator } from "@adam/core";
 import {
   webFetchTool,
   readFileTool,
@@ -70,6 +70,7 @@ export function registerChatCommand(program: Command): void {
       let agent: Agent;
       let profile!: ProfileStore;
       let personality!: PersonalityStore;
+      let consolidator!: MemoryConsolidator;
 
       try {
         const dataDir = join(homedir(), ADAM_HOME_DIR, "data");
@@ -131,6 +132,13 @@ export function registerChatCommand(program: Command): void {
           name: config.daemon.agentName,
         }, profile, personality);
 
+        // Stochastic memory consolidator — runs in the background during CLI sessions too
+        consolidator = new MemoryConsolidator(profile, episodic, router, {
+          minIntervalMs: 15 * 60 * 1000, // 15 min min for interactive sessions
+          maxIntervalMs: 30 * 60 * 1000,
+        });
+        consolidator.start();
+
         const factCount = profile.getAll().length;
         const hasPersonality = personality.exists();
         const memoryNote = factCount > 0
@@ -158,7 +166,7 @@ export function registerChatCommand(program: Command): void {
       console.log("");
 
       // ── Chat REPL ─────────────────────────────────────────────────────────────
-      await runRepl(chalk, ora, agent, config, profile, personality);
+      await runRepl(chalk, ora, agent, config, profile, personality, consolidator);
     });
 }
 
@@ -171,6 +179,7 @@ async function runRepl(
   config: AdamConfig,
   profile: ProfileStore,
   personality: PersonalityStore,
+  consolidator: MemoryConsolidator,
 ): Promise<void> {
   const sessionId = generateSessionId();
   const agentName = config.daemon.agentName;
@@ -188,9 +197,11 @@ async function runRepl(
     chalk.bold("  Commands:"),
     `  ${chalk.white("/help")}                    — show this message`,
     `  ${chalk.white("/memory")}                  — show what Adam knows about you`,
-    `  ${chalk.white("/remember <key> = <value>")} — manually store a fact`,
+    `  ${chalk.white("/remember <key> = <value>")} — manually store a fact (protected, never decays)`,
     `  ${chalk.white("/forget <key>")}             — delete a specific memory`,
     `  ${chalk.white("/forget all")}               — clear all profile memory`,
+    `  ${chalk.white("/protect <key>")}            — lock a memory so it never decays`,
+    `  ${chalk.white("/unprotect <key>")}          — allow a memory to decay naturally`,
     `  ${chalk.white("/personality")}              — view Adam's personality profile`,
     `  ${chalk.white("/personality reset")}        — reset personality to defaults`,
     `  ${chalk.white("/clear")}                    — clear the screen`,
@@ -242,8 +253,18 @@ async function runRepl(
         for (const [cat, entries] of Object.entries(byCategory)) {
           console.log(chalk.gray(`\n  ${cat}`));
           for (const f of entries) {
-            const conf = f.confidence < 1 ? chalk.gray(` (${Math.round(f.confidence * 100)}%)`) : "";
-            console.log(`    ${chalk.white(f.key)}: ${f.value}${conf}`);
+            const conf = Math.round(f.confidence * 100);
+            // Health bar — visual decay indicator
+            const bars = Math.round(conf / 10);
+            const bar = "█".repeat(bars) + "░".repeat(10 - bars);
+            const barColor = conf > 75 ? chalk.green(bar) : conf > 40 ? chalk.yellow(bar) : chalk.red(bar);
+            const protectedBadge = f.protected ? chalk.cyan(" 🔒") : "";
+            const sourceBadge = f.source === "user" ? chalk.gray(" [manual]") : f.source === "consolidated" ? chalk.gray(" [consolidated]") : chalk.gray(" [auto]");
+            const lastRef = f.lastReferencedAt
+              ? chalk.gray(` last used ${formatAge(f.lastReferencedAt)}`)
+              : "";
+            console.log(`    ${chalk.white(f.key)}: ${f.value}`);
+            console.log(`      ${barColor} ${conf}%${protectedBadge}${sourceBadge}${lastRef}`);
           }
         }
         console.log("");
@@ -285,6 +306,42 @@ async function runRepl(
             ? chalk.green(`\n  Forgotten: ${arg}\n`)
             : chalk.gray(`\n  No memory found for key: ${arg}\n`),
         );
+      }
+      ask();
+      return;
+    }
+
+    if (input.startsWith("/protect") && !input.startsWith("/unprotect")) {
+      const arg = input.slice("/protect".length).trim();
+      if (!arg) {
+        console.log(chalk.gray('\n  Usage: /protect <key>\n'));
+        ask();
+        return;
+      }
+      const exists = profile.get(arg) !== null;
+      if (!exists) {
+        console.log(chalk.gray(`\n  No memory found for key: ${arg}\n`));
+      } else {
+        profile.protect(arg, true);
+        console.log(chalk.cyan(`\n  Protected: ${arg} — this memory will never decay.\n`));
+      }
+      ask();
+      return;
+    }
+
+    if (input.startsWith("/unprotect")) {
+      const arg = input.slice("/unprotect".length).trim();
+      if (!arg) {
+        console.log(chalk.gray('\n  Usage: /unprotect <key>\n'));
+        ask();
+        return;
+      }
+      const exists = profile.get(arg) !== null;
+      if (!exists) {
+        console.log(chalk.gray(`\n  No memory found for key: ${arg}\n`));
+      } else {
+        profile.protect(arg, false);
+        console.log(chalk.gray(`\n  Unprotected: ${arg} — this memory will decay if unused.\n`));
       }
       ask();
       return;
@@ -363,6 +420,7 @@ async function runRepl(
   };
 
   rl.on("close", () => {
+    consolidator.stop();
     console.log(chalk.gray("\n  Goodbye.\n"));
     process.exit(0);
   });
@@ -542,6 +600,17 @@ function describePool(pool: ModelPoolConfig): string {
   if (pool.fast.length > 0) parts.push(`fast: ${label(pool.fast[0]!)}`);
   if (pool.capable.length > 0) parts.push(`capable: ${label(pool.capable[0]!)}`);
   return parts.join("  ·  ") || "no models";
+}
+
+function formatAge(date: Date): string {
+  const ms = Date.now() - date.getTime();
+  const minutes = Math.floor(ms / 60_000);
+  const hours = Math.floor(ms / 3_600_000);
+  const days = Math.floor(ms / 86_400_000);
+  if (days > 0) return `${days}d ago`;
+  if (hours > 0) return `${hours}h ago`;
+  if (minutes > 0) return `${minutes}m ago`;
+  return "just now";
 }
 
 function printBanner(chalk: Chalk, config: AdamConfig): void {

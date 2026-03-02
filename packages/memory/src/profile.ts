@@ -15,13 +15,26 @@ export type ProfileEntry = {
   confidence: number;
   source: string;
   version: number;
+  protected: boolean;
+  lastReferencedAt: Date | null;
   updatedAt: Date;
+};
+
+export type DecayStats = {
+  checked: number;
+  reinforced: number;
+  decayed: number;
+  removed: number;
 };
 
 /**
  * Typed user preferences and long-term facts.
- * Versioned — every update creates a new row, previous is soft-deleted.
- * Replaces OpenClaw's MEMORY.md and SOUL.md flat files.
+ *
+ * Implements a CA-inspired lifecycle:
+ *  - Facts used in prompts are reinforced (confidence → 1.0)
+ *  - Facts not referenced decay exponentially over time
+ *  - Facts that decay below the threshold are pruned
+ *  - User-entered and protected facts are immune to decay
  */
 export class ProfileStore {
   constructor(
@@ -32,7 +45,7 @@ export class ProfileStore {
   set(
     key: string,
     value: string,
-    opts: { category?: string; confidence?: number; source?: string } = {},
+    opts: { category?: string; confidence?: number; source?: string; protected?: boolean } = {},
   ): Result<string, AdamError> {
     return trySync(() => {
       const existing = this.db
@@ -52,6 +65,10 @@ export class ProfileStore {
           .run();
       }
 
+      const source = opts.source ?? "user";
+      // User-entered facts are always protected
+      const isProtected = opts.protected ?? source === "user";
+
       const id = generateId();
       const now = new Date().toISOString();
       const insertRow: ProfileMemoryInsert = {
@@ -60,8 +77,9 @@ export class ProfileStore {
         value: this.encryptionKey ? "" : value,
         category: opts.category ?? "general",
         confidence: opts.confidence ?? 1.0,
-        source: opts.source ?? "user",
+        source,
         version,
+        protected: isProtected,
         updatedAt: now,
       };
 
@@ -119,6 +137,8 @@ export class ProfileStore {
         confidence: row.confidence,
         source: row.source,
         version: row.version,
+        protected: row.protected ?? false,
+        lastReferencedAt: row.lastReferencedAt ? new Date(row.lastReferencedAt) : null,
         updatedAt: new Date(row.updatedAt),
       };
     });
@@ -132,5 +152,94 @@ export class ProfileStore {
         .where(and(eq(profileMemory.key, key), isNull(profileMemory.deletedAt)))
         .run();
     }, "profile:delete-failed");
+  }
+
+  /**
+   * Mark a fact as referenced — boosts confidence toward 1.0 and records
+   * the timestamp. Called whenever a fact is injected into a prompt.
+   */
+  reinforce(key: string, amount = 0.08): void {
+    const row = this.db
+      .select()
+      .from(profileMemory)
+      .where(and(eq(profileMemory.key, key), isNull(profileMemory.deletedAt)))
+      .limit(1)
+      .all()[0];
+
+    if (!row) return;
+
+    const newConfidence = Math.min(1.0, row.confidence + amount);
+    const now = new Date().toISOString();
+
+    this.db
+      .update(profileMemory)
+      .set({ confidence: newConfidence, lastReferencedAt: now, updatedAt: now })
+      .where(eq(profileMemory.id, row.id))
+      .run();
+  }
+
+  /**
+   * Apply exponential decay to all non-protected, auto-extracted facts.
+   * Facts below the minimum confidence threshold are pruned entirely.
+   *
+   * This is the CA analogy: facts that aren't reinforced by active use
+   * lose their alpha channel and eventually die.
+   *
+   * @param halfLifeDays  Confidence halves after this many days without reference. Default: 30.
+   * @param minConfidence Facts below this value are deleted. Default: 0.25.
+   */
+  decay(halfLifeDays = 30, minConfidence = 0.25): DecayStats {
+    const stats: DecayStats = { checked: 0, reinforced: 0, decayed: 0, removed: 0 };
+    const facts = this.getAll();
+    const now = Date.now();
+    const lambda = Math.LN2 / halfLifeDays;
+
+    for (const fact of facts) {
+      stats.checked++;
+
+      // Protected and user-entered facts are immortal
+      if (fact.protected || fact.source === "user") {
+        stats.reinforced++;
+        continue;
+      }
+
+      const lastRef = fact.lastReferencedAt ?? fact.updatedAt;
+      const daysSince = (now - lastRef.getTime()) / 86_400_000;
+
+      // No decay within the first day
+      if (daysSince < 1) continue;
+
+      const newConfidence = fact.confidence * Math.exp(-lambda * daysSince);
+
+      if (newConfidence < minConfidence) {
+        this.delete(fact.key);
+        stats.removed++;
+      } else {
+        this.db
+          .update(profileMemory)
+          .set({ confidence: newConfidence, updatedAt: new Date().toISOString() })
+          .where(and(eq(profileMemory.key, fact.key), isNull(profileMemory.deletedAt)))
+          .run();
+        stats.decayed++;
+      }
+    }
+
+    return stats;
+  }
+
+  /**
+   * Toggle the protected flag on a fact.
+   * Protected facts never decay, regardless of when they were last referenced.
+   */
+  protect(key: string, value = true): void {
+    this.db
+      .update(profileMemory)
+      .set({ protected: value, updatedAt: new Date().toISOString() })
+      .where(and(eq(profileMemory.key, key), isNull(profileMemory.deletedAt)))
+      .run();
+  }
+
+  ok(): Result<true, AdamError> {
+    return ok(true);
   }
 }

@@ -26,7 +26,7 @@ import {
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue, PersonalityStore } from "@adam/core";
+import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator } from "@adam/core";
 import { tool } from "ai";
 import { z } from "zod";
 import {
@@ -196,6 +196,11 @@ async function main() {
     });
   }
 
+  // Start the stochastic memory consolidator — decays unused facts, extracts
+  // durable knowledge from old episodes. No global clock; fires at random intervals.
+  const consolidator = new MemoryConsolidator(profile, episodic, router);
+  consolidator.start();
+
   const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter, personality };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
@@ -214,6 +219,7 @@ async function main() {
 
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down`);
+    consolidator.stop();
     for (const adapter of adapters) await adapter.stop().catch(() => {});
     server.close();
     process.exit(0);

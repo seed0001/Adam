@@ -4,3 +4,4 @@ export * from "./queue.js";
 export * from "./executor.js";
 export * from "./agent.js";
 export * from "./personality.js";
+export * from "./consolidator.js";

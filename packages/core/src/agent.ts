@@ -185,13 +185,21 @@ export class Agent {
     }
 
     // Layer 3: user profile facts
+    // Facts injected here are actively shaping this response — reinforce them.
+    // This is the CA's update rule: cells that participate in the pattern get stronger.
     if (this.profile) {
       const facts = this.profile.getAll();
       if (facts.length > 0) {
-        const factLines = facts
+        const topFacts = facts
           .sort((a, b) => b.confidence - a.confidence)
-          .slice(0, 40)
-          .map((f) => `- ${f.key}: ${f.value}`)
+          .slice(0, 40);
+
+        for (const f of topFacts) {
+          this.profile.reinforce(f.key);
+        }
+
+        const factLines = topFacts
+          .map((f) => `- ${f.key}: ${f.value} (confidence: ${f.confidence.toFixed(2)})`)
           .join("\n");
         prompt += `\n\nWhat you know about this user:\n${factLines}`;
       }

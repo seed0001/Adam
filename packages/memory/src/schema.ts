@@ -51,6 +51,10 @@ export const profileMemory = sqliteTable("profile_memory", {
   confidence: real("confidence").notNull().default(1.0),
   source: text("source").notNull().default("user"),
   version: integer("version").notNull().default(1),
+  /** Last time this fact was injected into a prompt — drives decay. */
+  lastReferencedAt: text("last_referenced_at"),
+  /** Protected facts never decay. User-entered facts are always protected. */
+  protected: integer("protected", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at")
     .notNull()
     .default(sql`(datetime('now'))`),
