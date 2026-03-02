@@ -100,6 +100,7 @@ export type ProvidersConfig = {
   openai: CloudProviderConfig;
   google: CloudProviderConfig;
   groq: CloudProviderConfig;
+  xai: CloudProviderConfig;
   mistral: CloudProviderConfig;
   deepseek: CloudProviderConfig;
   openrouter: CloudProviderConfig;

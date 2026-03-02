@@ -6,6 +6,7 @@ const VAULT_KEYS = {
   openai: "provider:openai:api-key",
   google: "provider:google:api-key",
   groq: "provider:groq:api-key",
+  xai: "provider:xai:api-key",
   mistral: "provider:mistral:api-key",
   deepseek: "provider:deepseek:api-key",
   openrouter: "provider:openrouter:api-key",
@@ -128,13 +129,14 @@ export function registerInitCommand(program: Command): void {
           chalk.gray("  OS keychain via keytar and are never written to the config file.\n"),
       );
 
-      type CloudProvider = "anthropic" | "openai" | "google" | "groq" | "mistral" | "deepseek" | "openrouter";
+      type CloudProvider = "anthropic" | "openai" | "google" | "groq" | "xai" | "mistral" | "deepseek" | "openrouter";
 
       const cloudProviders: { value: CloudProvider; name: string }[] = [
         { value: "anthropic", name: "Anthropic (Claude)" },
         { value: "openai", name: "OpenAI (GPT)" },
         { value: "google", name: "Google (Gemini)" },
-        { value: "groq", name: "Groq (fast inference)" },
+        { value: "groq", name: "Groq (hosted LLaMA / Mixtral — fast inference)" },
+        { value: "xai", name: "xAI (Grok-2, Grok-3)" },
         { value: "mistral", name: "Mistral AI" },
         { value: "deepseek", name: "DeepSeek" },
         { value: "openrouter", name: "OpenRouter (unified gateway)" },
@@ -437,13 +439,14 @@ async function installVoiceDeps(pythonCmd: string): Promise<{ ok: true } | { ok:
 
 function getDefaultModels(provider: string): { fast: string; capable: string } {
   const defaults: Record<string, { fast: string; capable: string }> = {
-    anthropic: { fast: "claude-3-5-haiku-latest", capable: "claude-sonnet-4-5" },
-    openai: { fast: "gpt-4o-mini", capable: "gpt-4o" },
-    google: { fast: "gemini-2.0-flash", capable: "gemini-2.5-pro-preview-05-06" },
-    groq: { fast: "llama-3.1-8b-instant", capable: "llama-3.3-70b-versatile" },
-    mistral: { fast: "mistral-small-latest", capable: "mistral-large-latest" },
-    deepseek: { fast: "deepseek-chat", capable: "deepseek-reasoner" },
-    openrouter: { fast: "meta-llama/llama-3.1-8b-instruct", capable: "anthropic/claude-sonnet-4-5" },
+    anthropic:  { fast: "claude-3-5-haiku-latest",                 capable: "claude-sonnet-4-5" },
+    openai:     { fast: "gpt-4o-mini",                              capable: "gpt-4o" },
+    google:     { fast: "gemini-2.0-flash",                         capable: "gemini-2.5-pro-preview-05-06" },
+    groq:       { fast: "llama-3.1-8b-instant",                     capable: "llama-3.3-70b-versatile" },
+    xai:        { fast: "grok-3-fast",                              capable: "grok-3" },
+    mistral:    { fast: "mistral-small-latest",                     capable: "mistral-large-latest" },
+    deepseek:   { fast: "deepseek-chat",                            capable: "deepseek-reasoner" },
+    openrouter: { fast: "meta-llama/llama-3.1-8b-instruct",        capable: "anthropic/claude-sonnet-4-5" },
   };
   return defaults[provider] ?? { fast: "default", capable: "default" };
 }

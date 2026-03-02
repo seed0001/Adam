@@ -479,6 +479,7 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
     "openai",
     "google",
     "groq",
+    "xai",
     "mistral",
     "deepseek",
     "openrouter",

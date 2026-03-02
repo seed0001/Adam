@@ -5,6 +5,7 @@ import { createGroq } from "@ai-sdk/groq";
 import { createMistral } from "@ai-sdk/mistral";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createXai } from "@ai-sdk/xai";
 import { ollama } from "ollama-ai-provider";
 import type { EmbeddingModel } from "ai";
 // Use a broad type to stay compatible across AI SDK provider versions
@@ -39,7 +40,8 @@ export type CloudProvider =
   | "groq"
   | "mistral"
   | "deepseek"
-  | "openrouter";
+  | "openrouter"
+  | "xai";
 
 export type LocalProvider = "ollama" | "lmstudio" | "vllm" | "openai-compatible";
 
@@ -112,6 +114,8 @@ export class ProviderRegistry {
         return createDeepSeek({ apiKey: config.apiKey })(config.model);
       case "openrouter":
         return createOpenRouter({ apiKey: config.apiKey })(config.model);
+      case "xai":
+        return createXai({ apiKey: config.apiKey })(config.model);
     }
   }
 

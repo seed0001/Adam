@@ -585,7 +585,7 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   const capable: ProviderConfig[] = [];
 
   const cloudProviders = [
-    "anthropic", "openai", "google", "groq", "mistral", "deepseek", "openrouter",
+    "anthropic", "openai", "google", "groq", "xai", "mistral", "deepseek", "openrouter",
   ] as const;
 
   for (const name of cloudProviders) {

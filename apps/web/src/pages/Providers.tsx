@@ -138,25 +138,70 @@ function TokenField({ vaultKey, isSet, onSaved }: { vaultKey: string; isSet: boo
 // ── Cloud provider row ────────────────────────────────────────────────────────
 
 const CLOUD_PROVIDERS: {
-  id: keyof Pick<ProvidersConfig, "anthropic" | "openai" | "google" | "groq" | "mistral" | "deepseek" | "openrouter">;
+  id: keyof Pick<ProvidersConfig, "anthropic" | "openai" | "google" | "groq" | "xai" | "mistral" | "deepseek" | "openrouter">;
   name: string;
+  subtitle: string;
   fastDefault: string;
   capableDefault: string;
   docsUrl: string;
+  modelsUrl: string;
 }[] = [
-  { id: "groq",       name: "Groq",        fastDefault: "llama-3.1-8b-instant",    capableDefault: "llama-3.3-70b-versatile", docsUrl: "https://console.groq.com/keys" },
-  { id: "openai",     name: "OpenAI",      fastDefault: "gpt-4o-mini",              capableDefault: "gpt-4o",                  docsUrl: "https://platform.openai.com/api-keys" },
-  { id: "anthropic",  name: "Anthropic",   fastDefault: "claude-haiku-20240307",    capableDefault: "claude-opus-4-5",         docsUrl: "https://console.anthropic.com/settings/keys" },
-  { id: "google",     name: "Google",      fastDefault: "gemini-1.5-flash",         capableDefault: "gemini-1.5-pro",          docsUrl: "https://aistudio.google.com/app/apikey" },
-  { id: "mistral",    name: "Mistral",     fastDefault: "mistral-small-latest",     capableDefault: "mistral-large-latest",    docsUrl: "https://console.mistral.ai/api-keys" },
-  { id: "deepseek",   name: "DeepSeek",    fastDefault: "deepseek-chat",            capableDefault: "deepseek-reasoner",       docsUrl: "https://platform.deepseek.com/api_keys" },
-  { id: "openrouter", name: "OpenRouter",  fastDefault: "meta-llama/llama-3.1-8b-instruct:free", capableDefault: "anthropic/claude-opus-4-5", docsUrl: "https://openrouter.ai/keys" },
+  {
+    id: "xai", name: "Grok (xAI)",
+    subtitle: "Grok-3, Grok-3 Fast — by xAI",
+    fastDefault: "grok-3-fast", capableDefault: "grok-3",
+    docsUrl: "https://console.x.ai/", modelsUrl: "https://docs.x.ai/docs/models",
+  },
+  {
+    id: "groq", name: "Groq",
+    subtitle: "Cloud-hosted LLaMA & Mixtral — very fast inference",
+    fastDefault: "llama-3.1-8b-instant", capableDefault: "llama-3.3-70b-versatile",
+    docsUrl: "https://console.groq.com/keys", modelsUrl: "https://console.groq.com/docs/models",
+  },
+  {
+    id: "openai", name: "OpenAI",
+    subtitle: "GPT-4o, GPT-4o mini, o1, o3",
+    fastDefault: "gpt-4o-mini", capableDefault: "gpt-4o",
+    docsUrl: "https://platform.openai.com/api-keys", modelsUrl: "https://platform.openai.com/docs/models",
+  },
+  {
+    id: "anthropic", name: "Anthropic",
+    subtitle: "Claude 3.5 Haiku, Claude Sonnet, Claude Opus",
+    fastDefault: "claude-3-5-haiku-latest", capableDefault: "claude-sonnet-4-5",
+    docsUrl: "https://console.anthropic.com/settings/keys", modelsUrl: "https://docs.anthropic.com/en/docs/about-claude/models",
+  },
+  {
+    id: "google", name: "Google",
+    subtitle: "Gemini 2.0 Flash, Gemini 2.5 Pro",
+    fastDefault: "gemini-2.0-flash", capableDefault: "gemini-2.5-pro-preview-05-06",
+    docsUrl: "https://aistudio.google.com/app/apikey", modelsUrl: "https://ai.google.dev/gemini-api/docs/models/gemini",
+  },
+  {
+    id: "mistral", name: "Mistral",
+    subtitle: "Mistral Small, Mistral Large, Codestral",
+    fastDefault: "mistral-small-latest", capableDefault: "mistral-large-latest",
+    docsUrl: "https://console.mistral.ai/api-keys", modelsUrl: "https://docs.mistral.ai/getting-started/models/",
+  },
+  {
+    id: "deepseek", name: "DeepSeek",
+    subtitle: "DeepSeek-V3 (chat), DeepSeek-R1 (reasoner)",
+    fastDefault: "deepseek-chat", capableDefault: "deepseek-reasoner",
+    docsUrl: "https://platform.deepseek.com/api_keys", modelsUrl: "https://platform.deepseek.com/",
+  },
+  {
+    id: "openrouter", name: "OpenRouter",
+    subtitle: "Unified gateway to 200+ models",
+    fastDefault: "meta-llama/llama-3.1-8b-instruct:free", capableDefault: "anthropic/claude-sonnet-4-5",
+    docsUrl: "https://openrouter.ai/keys", modelsUrl: "https://openrouter.ai/models",
+  },
 ];
 
 function CloudProviderRow({
   id,
   name,
+  subtitle,
   docsUrl,
+  modelsUrl,
   fastDefault,
   capableDefault,
   config,
@@ -166,7 +211,9 @@ function CloudProviderRow({
 }: {
   id: string;
   name: string;
+  subtitle: string;
   docsUrl: string;
+  modelsUrl: string;
   fastDefault: string;
   capableDefault: string;
   config: CloudProviderConfig;
@@ -179,18 +226,26 @@ function CloudProviderRow({
 
   return (
     <div className="px-4 py-3 space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
           <Toggle checked={config.enabled} onChange={(v) => onChange({ enabled: v })} />
-          <span className="text-sm text-zinc-200 font-medium">{name}</span>
-          <a href={docsUrl} target="_blank" rel="noreferrer" className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors">
-            Get key ↗
-          </a>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-zinc-200 font-medium">{name}</span>
+              <a href={docsUrl} target="_blank" rel="noreferrer" className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors shrink-0">
+                Get key ↗
+              </a>
+            </div>
+            <p className="text-xs text-zinc-600 mt-0.5">{subtitle}</p>
+          </div>
         </div>
         <ApiKeyField vaultKey={vaultKey} isSet={isSet} onSaved={onVaultChange} />
       </div>
+
+      {/* Model inputs — full width, stacked */}
       {config.enabled && (
-        <div className="pl-12 flex gap-4">
+        <div className="pl-12 space-y-2">
           <ModelInput
             label="Fast"
             value={config.defaultModels.fast ?? fastDefault}
@@ -201,6 +256,14 @@ function CloudProviderRow({
             value={config.defaultModels.capable ?? capableDefault}
             onChange={(v) => onChange({ defaultModels: { ...config.defaultModels, capable: v } })}
           />
+          <a
+            href={modelsUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-block text-xs text-zinc-700 hover:text-zinc-500 transition-colors mt-1"
+          >
+            Browse {name} models ↗
+          </a>
         </div>
       )}
     </div>
@@ -343,12 +406,14 @@ export default function Providers() {
 
         {/* Cloud providers */}
         <Section title="Cloud Providers" subtitle="API keys are stored securely — never written to disk in plain text.">
-          {CLOUD_PROVIDERS.map(({ id, name, docsUrl, fastDefault, capableDefault }) => (
+          {CLOUD_PROVIDERS.map(({ id, name, subtitle, docsUrl, modelsUrl, fastDefault, capableDefault }) => (
             <CloudProviderRow
               key={id}
               id={id}
               name={name}
+              subtitle={subtitle}
               docsUrl={docsUrl}
+              modelsUrl={modelsUrl}
               fastDefault={fastDefault}
               capableDefault={capableDefault}
               config={providers[id as keyof typeof providers] as CloudProviderConfig}
