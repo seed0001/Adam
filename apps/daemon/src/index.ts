@@ -407,6 +407,136 @@ function createApiServer(ctx: ApiContext) {
         if (!text) return json(res, 400, { error: "message is required" });
 
         const sessionId = body.sessionId ?? generateSessionId();
+
+        // ── Slash command interception ──────────────────────────────────────
+        // Handle /commands directly so they don't reach the agent as natural
+        // language and accidentally trigger skill design mode.
+
+        if (text.startsWith("/remember ")) {
+          const rest = text.slice("/remember ".length).trim();
+          const eqIdx = rest.indexOf("=");
+          if (eqIdx !== -1) {
+            const key = rest.slice(0, eqIdx).trim();
+            const val = rest.slice(eqIdx + 1).trim();
+            ctx.profile.insert(key, val, "manual");
+            ctx.profile.protect(key);
+            return json(res, 200, { response: `Stored and protected: **${key}** = ${val}`, sessionId });
+          }
+          return json(res, 200, { response: "Usage: /remember key = value", sessionId });
+        }
+
+        if (text.startsWith("/forget ")) {
+          const key = text.slice("/forget ".length).trim();
+          if (key === "all") {
+            for (const f of ctx.profile.getAll()) ctx.profile.delete(f.key);
+            return json(res, 200, { response: "All profile memory cleared.", sessionId });
+          }
+          ctx.profile.delete(key);
+          return json(res, 200, { response: `Deleted memory: **${key}**`, sessionId });
+        }
+
+        if (text === "/memory") {
+          const facts = ctx.profile.getAll();
+          if (!facts.length) return json(res, 200, { response: "No profile memory stored yet.", sessionId });
+          const lines = facts.map((f) => {
+            const pct = Math.round(f.confidence * 100);
+            const bar = "█".repeat(Math.round(f.confidence * 10)) + "░".repeat(10 - Math.round(f.confidence * 10));
+            const badge = f.protected ? "🔒" : f.source === "manual" ? "✋" : "🤖";
+            return `${badge} **${f.key}** = ${f.value}\n   ${bar} ${pct}%`;
+          });
+          return json(res, 200, { response: lines.join("\n\n"), sessionId });
+        }
+
+        if (text === "/pad") {
+          const content = ctx.scratchpad.load();
+          return json(res, 200, { response: content || "Scratchpad is empty.", sessionId });
+        }
+
+        if (text === "/pad clear") {
+          const { unlinkSync, existsSync } = await import("node:fs");
+          if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
+          return json(res, 200, { response: "Scratchpad cleared.", sessionId });
+        }
+
+        if (text === "/workshop" || text === "/skills") {
+          const skills = ctx.skills.list();
+          if (!skills.length) return json(res, 200, { response: "No skill specs found.", sessionId });
+          const lines = skills.map((s) => `**${s.status.toUpperCase()}** · ${s.name} · \`${s.id}\``);
+          return json(res, 200, { response: lines.join("\n"), sessionId });
+        }
+
+        if (text.startsWith("/workshop show ")) {
+          const id = text.slice("/workshop show ".length).trim().replace(/"/g, "");
+          const skill = ctx.skills.get(id);
+          if (!skill) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          const steps = skill.steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n");
+          const triggers = skill.triggers.join(", ");
+          const tools = skill.allowedTools.join(", ");
+          const out = [
+            `📋 **${skill.name}** \`${skill.id}\``,
+            `*${skill.description}*`,
+            ``,
+            `**Status:** ${skill.status}`,
+            `**Triggers:** ${triggers}`,
+            `**Tools allowed:** ${tools}`,
+            ``,
+            `**Steps:**\n${steps}`,
+            skill.constraints?.length ? `\n**Constraints:** ${skill.constraints.join(", ")}` : "",
+            `\n**Success when:** ${skill.successCriteria}`,
+          ].filter(Boolean).join("\n");
+          return json(res, 200, { response: out, sessionId });
+        }
+
+        if (text.startsWith("/workshop approve ")) {
+          const id = text.slice("/workshop approve ".length).trim().replace(/"/g, "");
+          try {
+            const skill = ctx.skills.approve(id);
+            return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\n\nRun \`/workshop latent ${id}\` to mark it latent, or view it in the Skills tab.`, sessionId });
+          } catch (e: unknown) {
+            return json(res, 200, { response: `Could not approve \`${id}\`: ${e instanceof Error ? e.message : String(e)}`, sessionId });
+          }
+        }
+
+        if (text.startsWith("/workshop latent ")) {
+          const id = text.slice("/workshop latent ".length).trim().replace(/"/g, "");
+          try {
+            const skill = ctx.skills.makeLatent(id);
+            return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: approved → latent`, sessionId });
+          } catch (e: unknown) {
+            return json(res, 200, { response: `Could not mark latent \`${id}\`: ${e instanceof Error ? e.message : String(e)}`, sessionId });
+          }
+        }
+
+        if (text.startsWith("/workshop deprecate ")) {
+          const id = text.slice("/workshop deprecate ".length).trim().replace(/"/g, "");
+          try {
+            const skill = ctx.skills.deprecate(id);
+            return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
+          } catch (e: unknown) {
+            return json(res, 200, { response: `Could not deprecate \`${id}\`: ${e instanceof Error ? e.message : String(e)}`, sessionId });
+          }
+        }
+
+        if (text === "/help") {
+          return json(res, 200, { response: [
+            "**Slash commands available in chat:**",
+            "",
+            "`/memory` — show profile facts with confidence levels",
+            "`/remember key = value` — store a protected memory fact",
+            "`/forget key` — delete a memory fact",
+            "`/forget all` — clear all profile memory",
+            "`/pad` — view Adam's scratchpad",
+            "`/pad clear` — clear the scratchpad",
+            "`/workshop` — list all skill specs",
+            "`/workshop show <id>` — view a skill spec",
+            "`/workshop approve <id>` — approve a draft skill",
+            "`/workshop latent <id>` — mark a skill as latent",
+            "`/workshop deprecate <id>` — deprecate a skill",
+            "`/help` — show this list",
+          ].join("\n"), sessionId });
+        }
+
+        // ── Normal agent message ────────────────────────────────────────────
         const msg: InboundMessage = {
           id: generateId(),
           sessionId,
