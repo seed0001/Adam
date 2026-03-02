@@ -102,79 +102,89 @@ export default function Status() {
           {/* System */}
           <Card>
             <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">System</p>
-            <Row label="Agent" value={data.agentName} accent />
-            <Row label="Version" value={`v${data.version}`} />
-            <Row label="Uptime" value={formatUptime(data.uptime)} />
-            <Row label="Port" value={data.port} />
+            <Row label="Agent" value={data.agentName ?? "—"} accent />
+            <Row label="Version" value={data.version ? `v${data.version}` : "—"} />
+            <Row label="Uptime" value={data.uptime != null ? formatUptime(data.uptime) : "—"} />
+            {data.port != null && <Row label="Port" value={data.port} />}
           </Card>
 
           {/* Providers */}
-          <Card>
-            <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">Providers</p>
-            {data.providers.cloud.length > 0 ? (
-              <Row
-                label="Cloud"
-                value={
-                  <div className="flex gap-1.5 flex-wrap justify-end">
-                    {data.providers.cloud.map((p) => (
-                      <span key={p} className="text-[10px] text-sky-400 bg-sky-950/40 border border-sky-900/50 px-1.5 py-0.5 rounded">
-                        {p}
-                      </span>
-                    ))}
-                  </div>
-                }
-              />
-            ) : (
-              <Row label="Cloud" value={<span className="text-zinc-600">none</span>} />
-            )}
-            {data.providers.local.length > 0 ? (
-              <Row
-                label="Local"
-                value={
-                  <div className="flex gap-1.5 flex-wrap justify-end">
-                    {data.providers.local.map((p) => (
-                      <span key={p} className="text-[10px] text-green-400 bg-green-950/40 border border-green-900/50 px-1.5 py-0.5 rounded">
-                        {p}
-                      </span>
-                    ))}
-                  </div>
-                }
-              />
-            ) : (
-              <Row label="Local" value={<span className="text-zinc-600">none</span>} />
-            )}
-          </Card>
+          {data.providers && (
+            <Card>
+              <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">Providers</p>
+              {(data.providers.cloud ?? []).length > 0 ? (
+                <Row
+                  label="Cloud"
+                  value={
+                    <div className="flex gap-1.5 flex-wrap justify-end">
+                      {(data.providers.cloud ?? []).map((p) => (
+                        <span key={p} className="text-[10px] text-sky-400 bg-sky-950/40 border border-sky-900/50 px-1.5 py-0.5 rounded">
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  }
+                />
+              ) : (
+                <Row label="Cloud" value={<span className="text-zinc-600">none</span>} />
+              )}
+              {(data.providers.local ?? []).length > 0 ? (
+                <Row
+                  label="Local"
+                  value={
+                    <div className="flex gap-1.5 flex-wrap justify-end">
+                      {(data.providers.local ?? []).map((p) => (
+                        <span key={p} className="text-[10px] text-green-400 bg-green-950/40 border border-green-900/50 px-1.5 py-0.5 rounded">
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  }
+                />
+              ) : (
+                <Row label="Local" value={<span className="text-zinc-600">none</span>} />
+              )}
+            </Card>
+          )}
 
           {/* Budget */}
-          <Card>
-            <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">Budget</p>
-            <Row label="Daily limit" value={`$${data.budget.dailyLimitUsd.toFixed(2)}`} />
-            <Row label="Monthly limit" value={`$${data.budget.monthlyLimitUsd.toFixed(2)}`} />
-            <Row
-              label="Local fallback"
-              value={data.budget.fallbackToLocalOnExhaustion ? "enabled" : "disabled"}
-            />
-          </Card>
+          {data.budget && (
+            <Card>
+              <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">Budget</p>
+              <Row label="Daily limit" value={`$${(data.budget.dailyLimitUsd ?? 0).toFixed(2)}`} />
+              <Row label="Monthly limit" value={`$${(data.budget.monthlyLimitUsd ?? 0).toFixed(2)}`} />
+              <Row
+                label="Local fallback"
+                value={data.budget.fallbackToLocalOnExhaustion ? "enabled" : "disabled"}
+              />
+            </Card>
+          )}
 
           {/* Memory */}
-          <Card>
-            <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">Memory</p>
-            <Row label="Profile facts" value={data.memory.profileFacts} accent={data.memory.profileFacts > 0} />
-            {data.memory.categories.length > 0 && (
+          {data.memory && (
+            <Card>
+              <p className="text-[11px] text-zinc-600 font-medium uppercase tracking-wider mb-3">Memory</p>
               <Row
-                label="Categories"
-                value={
-                  <div className="flex gap-1.5 flex-wrap justify-end">
-                    {data.memory.categories.map((c) => (
-                      <span key={c} className="text-[10px] text-zinc-400 bg-zinc-900/60 border border-zinc-800/50 px-1.5 py-0.5 rounded">
-                        {c}
-                      </span>
-                    ))}
-                  </div>
-                }
+                label="Profile facts"
+                value={data.memory.profileFacts ?? 0}
+                accent={(data.memory.profileFacts ?? 0) > 0}
               />
-            )}
-          </Card>
+              {(data.memory.categories ?? []).length > 0 && (
+                <Row
+                  label="Categories"
+                  value={
+                    <div className="flex gap-1.5 flex-wrap justify-end">
+                      {(data.memory.categories ?? []).map((c) => (
+                        <span key={c} className="text-[10px] text-zinc-400 bg-zinc-900/60 border border-zinc-800/50 px-1.5 py-0.5 rounded">
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  }
+                />
+              )}
+            </Card>
+          )}
         </div>
       )}
     </div>
