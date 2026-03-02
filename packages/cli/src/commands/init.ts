@@ -232,7 +232,11 @@ export function registerInitCommand(program: Command): void {
           },
         ]);
         await vault.set(VAULT_KEYS.discord, botToken);
-        config.adapters.discord = { enabled: true, clientId };
+        config.adapters.discord = {
+          ...config.adapters.discord,
+          enabled: true,
+          clientId,
+        };
         console.warn(chalk.green("  ✓ Discord token stored in OS keychain"));
       }
 

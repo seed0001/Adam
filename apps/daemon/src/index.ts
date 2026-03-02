@@ -8,11 +8,13 @@ import {
   ADAM_VERSION,
   PORTS,
   loadConfig,
+  saveConfig,
   addLogHandler,
   createLogger,
   generateId,
   generateSessionId,
   type AdamConfig,
+  type DiscordAdapterConfig,
   type LogEntry,
   type InboundMessage,
 } from "@adam/shared";
@@ -51,12 +53,16 @@ addLogHandler((entry: LogEntry) => {
 
 // ── App context passed to the HTTP server ─────────────────────────────────────
 
+// Mutable wrapper so PATCH endpoints can update config in place
 type ApiContext = {
   config: AdamConfig;
   agent: Agent;
   profile: ProfileStore;
   episodic: EpisodicStore;
+  discordAdapter: DiscordAdapter | null;
 };
+
+type AdapterBundle = { adapters: BaseAdapter[]; discordAdapter: DiscordAdapter | null };
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -126,7 +132,7 @@ async function main() {
     profile,
   );
 
-  const adapters = await buildAdapters(config);
+  const { adapters, discordAdapter } = await buildAdapters(config);
   for (const adapter of adapters) {
     adapter.on("message", async (message) => {
       const result = await agent.process(message);
@@ -147,7 +153,7 @@ async function main() {
     });
   }
 
-  const ctx: ApiContext = { config, agent, profile, episodic };
+  const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
     logger.info(`API server on http://localhost:${config.daemon.port}`);
@@ -349,6 +355,60 @@ function createApiServer(ctx: ApiContext) {
         return json(res, 200, { entries: ctx.episodic.getRecentAcrossSessions(limit, days) });
       }
 
+      // ── GET /api/config ────────────────────────────────────────────────────
+      if (path === "/api/config" && req.method === "GET") {
+        return json(res, 200, {
+          daemon: ctx.config.daemon,
+          discord: ctx.config.adapters.discord,
+          telegram: ctx.config.adapters.telegram,
+          budget: ctx.config.budget,
+        });
+      }
+
+      // ── PATCH /api/config/discord ──────────────────────────────────────────
+      if (path === "/api/config/discord" && req.method === "PATCH") {
+        const patch = (await readBody(req)) as Partial<DiscordAdapterConfig>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          adapters: {
+            ...ctx.config.adapters,
+            discord: { ...ctx.config.adapters.discord, ...patch },
+          },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        // Hot-reload the Discord adapter if it's running
+        if (ctx.discordAdapter) ctx.discordAdapter.updateConfig(updated.adapters.discord);
+        return json(res, 200, { ok: true, config: updated.adapters.discord });
+      }
+
+      // ── PATCH /api/config/daemon ───────────────────────────────────────────
+      if (path === "/api/config/daemon" && req.method === "PATCH") {
+        const patch = (await readBody(req)) as Partial<AdamConfig["daemon"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          daemon: { ...ctx.config.daemon, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        return json(res, 200, { ok: true, config: updated.daemon });
+      }
+
+      // ── PATCH /api/config/budget ───────────────────────────────────────────
+      if (path === "/api/config/budget" && req.method === "PATCH") {
+        const patch = (await readBody(req)) as Partial<AdamConfig["budget"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          budget: { ...ctx.config.budget, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        return json(res, 200, { ok: true, config: updated.budget });
+      }
+
       // ── Static web UI ──────────────────────────────────────────────────────
       serveStatic(res, path);
     } catch (e: unknown) {
@@ -414,11 +474,9 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
 
 // ── Adapter builder ───────────────────────────────────────────────────────────
 
-async function buildAdapters(config: AdamConfig): Promise<BaseAdapter[]> {
-  // Only attach the CLI adapter when running interactively (stdin is a TTY).
-  // When spawned as a detached background process, stdin is closed and the
-  // readline interface would immediately emit 'close' and exit the process.
+async function buildAdapters(config: AdamConfig): Promise<AdapterBundle> {
   const adapters: BaseAdapter[] = process.stdin.isTTY ? [new CliAdapter()] : [];
+  let discordAdapter: DiscordAdapter | null = null;
 
   if (config.adapters.telegram.enabled) {
     const keyResult = await vault.get("adapter:telegram:bot-token");
@@ -432,12 +490,13 @@ async function buildAdapters(config: AdamConfig): Promise<BaseAdapter[]> {
     const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
     if (!token) logger.warn("Discord: enabled but no token — skipping");
     else {
-      adapters.push(new DiscordAdapter({ token, clientId: config.adapters.discord.clientId ?? "" }));
+      discordAdapter = new DiscordAdapter(token, config.adapters.discord);
+      adapters.push(discordAdapter);
       logger.info("Discord adapter ready");
     }
   }
 
-  return adapters;
+  return { adapters, discordAdapter };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -74,9 +74,23 @@ export const TelegramAdapterConfigSchema = z.object({
 
 export const DiscordAdapterConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  botToken: z.string().optional(),
   clientId: z.string().optional(),
+
+  // Access control
+  channelWhitelist: z.array(z.string()).default([]),      // empty = all channels
+  userBlacklist: z.array(z.string()).default([]),         // user IDs to always ignore
+  adminUsers: z.array(z.string()).default([]),            // can run /adam-config, !adam commands
+
+  // Behavior
+  mentionOnly: z.boolean().default(true),                // server msgs: require @mention
+  respondInThreads: z.boolean().default(false),          // auto-create threads for responses
+  rateLimitPerUserPerMinute: z.number().int().min(0).default(0), // 0 = unlimited
+
+  // Customization
+  systemPromptOverride: z.string().optional(),           // Discord-specific personality
+  maxMessageLength: z.number().int().min(500).max(4000).default(2000),
 });
+export type DiscordAdapterConfig = z.infer<typeof DiscordAdapterConfigSchema>;
 
 export const CliAdapterConfigSchema = z.object({
   enabled: z.boolean().default(true),

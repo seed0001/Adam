@@ -45,6 +45,38 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export type DiscordConfig = {
+  enabled: boolean;
+  clientId?: string;
+  channelWhitelist: string[];
+  userBlacklist: string[];
+  adminUsers: string[];
+  mentionOnly: boolean;
+  respondInThreads: boolean;
+  rateLimitPerUserPerMinute: number;
+  systemPromptOverride?: string;
+  maxMessageLength: number;
+};
+
+export type DaemonConfig = {
+  port: number;
+  logLevel: "debug" | "info" | "warn" | "error";
+  systemPrompt?: string;
+  agentName: string;
+};
+
+export type BudgetConfig = {
+  dailyLimitUsd: number;
+  monthlyLimitUsd: number;
+  fallbackToLocalOnExhaustion: boolean;
+};
+
+export type FullConfig = {
+  discord: DiscordConfig;
+  daemon: DaemonConfig;
+  budget: BudgetConfig;
+};
+
 export const api = {
   chat: (message: string, sessionId: string) =>
     apiFetch<ChatResponse>("/api/chat", {
@@ -66,4 +98,24 @@ export const api = {
     apiFetch<{ entries: EpisodicEntry[] }>(`/api/memory/episodic?limit=${limit}`).then(
       (r) => r.entries,
     ),
+
+  getConfig: () => apiFetch<FullConfig>("/api/config"),
+
+  patchDiscord: (patch: Partial<DiscordConfig>) =>
+    apiFetch<{ ok: boolean; config: DiscordConfig }>("/api/config/discord", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  patchDaemon: (patch: Partial<DaemonConfig>) =>
+    apiFetch<{ ok: boolean; config: DaemonConfig }>("/api/config/daemon", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  patchBudget: (patch: Partial<BudgetConfig>) =>
+    apiFetch<{ ok: boolean; config: BudgetConfig }>("/api/config/budget", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
 };
