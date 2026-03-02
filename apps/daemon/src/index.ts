@@ -415,7 +415,10 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
 // ── Adapter builder ───────────────────────────────────────────────────────────
 
 async function buildAdapters(config: AdamConfig): Promise<BaseAdapter[]> {
-  const adapters: BaseAdapter[] = [new CliAdapter()];
+  // Only attach the CLI adapter when running interactively (stdin is a TTY).
+  // When spawned as a detached background process, stdin is closed and the
+  // readline interface would immediately emit 'close' and exit the process.
+  const adapters: BaseAdapter[] = process.stdin.isTTY ? [new CliAdapter()] : [];
 
   if (config.adapters.telegram.enabled) {
     const keyResult = await vault.get("adapter:telegram:bot-token");
