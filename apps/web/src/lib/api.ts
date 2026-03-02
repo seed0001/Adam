@@ -118,4 +118,18 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+
+  getPersonality: () =>
+    apiFetch<{ content: string; path: string }>("/api/personality"),
+
+  patchPersonality: (content: string) =>
+    apiFetch<{ ok: boolean; content: string }>("/api/personality", {
+      method: "PATCH",
+      body: JSON.stringify({ content }),
+    }),
+
+  resetPersonality: () =>
+    apiFetch<{ ok: boolean; content: string }>("/api/personality/reset", {
+      method: "POST",
+    }),
 };

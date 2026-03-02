@@ -15,6 +15,7 @@ import { IntentClassifier } from "./classifier.js";
 import { Planner } from "./planner.js";
 import { Executor, type ToolRegistry } from "./executor.js";
 import type { TaskQueue } from "./queue.js";
+import type { PersonalityStore } from "./personality.js";
 
 const logger = createLogger("core:agent");
 
@@ -41,6 +42,7 @@ export class Agent {
     private tools: ToolRegistry,
     private config: AgentConfig,
     private profile: ProfileStore | null = null,
+    private personality: PersonalityStore | null = null,
   ) {
     this.classifier = new IntentClassifier(router);
     this.planner = new Planner(router);
@@ -86,8 +88,9 @@ export class Agent {
       importance: 0.5,
     });
 
-    // Fire-and-forget: extract user facts in the background without blocking
+    // Fire-and-forget: extract user facts and update personality in the background
     void this.extractAndStoreProfileFacts(message.content, responseText, message.sessionId);
+    void this.maybeUpdatePersonality(message.content, message.sessionId);
 
     const outbound: OutboundMessage = {
       sessionId: message.sessionId,
@@ -162,22 +165,38 @@ export class Agent {
   }
 
   /**
-   * Builds the system prompt, injecting profile facts if available.
-   * Called on every turn so new facts are reflected immediately.
+   * Builds the system prompt, layering in:
+   *   1. Base system prompt (structural + default personality)
+   *   2. Personality profile file — evolves through conversation
+   *   3. User profile facts — what Adam knows about this specific person
+   *
+   * Called on every turn so live edits to personality.md are reflected immediately.
    */
   private buildEnrichedSystemPrompt(): string {
-    if (!this.profile) return this.config.systemPrompt;
+    let prompt = this.config.systemPrompt;
 
-    const facts = this.profile.getAll();
-    if (facts.length === 0) return this.config.systemPrompt;
+    // Layer 2: personality profile
+    if (this.personality) {
+      const personalityContent = this.personality.load();
+      if (personalityContent) {
+        prompt += `\n\n---\nPersonality profile (takes precedence over defaults above):\n\n${personalityContent.trim()}\n---`;
+      }
+    }
 
-    const factLines = facts
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, 40)
-      .map((f) => `- ${f.key}: ${f.value}`)
-      .join("\n");
+    // Layer 3: user profile facts
+    if (this.profile) {
+      const facts = this.profile.getAll();
+      if (facts.length > 0) {
+        const factLines = facts
+          .sort((a, b) => b.confidence - a.confidence)
+          .slice(0, 40)
+          .map((f) => `- ${f.key}: ${f.value}`)
+          .join("\n");
+        prompt += `\n\nWhat you know about this user:\n${factLines}`;
+      }
+    }
 
-    return `${this.config.systemPrompt}\n\nWhat you know about this user:\n${factLines}`;
+    return prompt;
   }
 
   /**
@@ -229,6 +248,62 @@ Examples: [{"key":"os","value":"Windows","category":"context","confidence":0.9}]
           confidence: c,
           source: "auto-extracted",
         });
+      }
+    } catch {
+      // best-effort — never throw
+    }
+  }
+
+  /**
+   * Detects if the user said something that should reshape Adam's personality,
+   * and if so, rewrites the personality profile file.
+   * Fire-and-forget — never blocks a response.
+   */
+  private async maybeUpdatePersonality(userMessage: string, sessionId: string): Promise<void> {
+    if (!this.personality) return;
+
+    // Only trigger on messages that plausibly contain personality direction
+    const triggers = [
+      "be more", "be less", "stop being", "don't be", "you should", "i want you to",
+      "talk to me", "speak to me", "your personality", "your tone", "your style",
+      "more sarcastic", "less formal", "more direct", "be honest", "be blunt",
+      "sound like", "act like", "you are", "from now on", "always", "never say",
+      "don't say", "i prefer", "i hate when you", "i like when you",
+    ];
+    const lower = userMessage.toLowerCase();
+    const hasTrigger = triggers.some((t) => lower.includes(t));
+    if (!hasTrigger) return;
+
+    try {
+      const currentProfile = this.personality.loadOrSeed();
+
+      const result = await this.router.generate({
+        sessionId,
+        tier: "fast",
+        system: `You maintain an AI agent's personality profile document.
+
+The profile is a markdown file that defines the agent's character, communication style, and behavior.
+When the user expresses how they want the agent to behave, speak, or what traits it should have,
+update the profile document to incorporate that preference.
+
+Rules:
+- Make surgical, minimal changes — only update what the user asked for
+- Keep the same markdown structure and all unchanged sections intact
+- Do NOT add things the user didn't ask for
+- If the message is ambiguous or does not contain a clear personality preference, return exactly: NO_UPDATE
+- Return the full updated profile document if changes are warranted, nothing else`,
+        prompt: `Current personality profile:\n\n${currentProfile}\n\n---\nUser's message: "${userMessage}"\n\nShould the personality profile be updated? If yes, return the full updated document. If no, return: NO_UPDATE`,
+      });
+
+      if (result.isErr()) return;
+
+      const response = result.value.trim();
+      if (response === "NO_UPDATE" || response.startsWith("NO_UPDATE")) return;
+
+      // Only save if the response looks like a personality document
+      if (response.includes("#") || response.includes("##") || response.length > 100) {
+        this.personality.save(response);
+        logger.info("Personality profile updated from conversation");
       }
     } catch {
       // best-effort — never throw

@@ -26,7 +26,7 @@ import {
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue } from "@adam/core";
+import { Agent, TaskQueue, PersonalityStore } from "@adam/core";
 import {
   CliAdapter,
   TelegramAdapter,
@@ -60,6 +60,7 @@ type ApiContext = {
   profile: ProfileStore;
   episodic: EpisodicStore;
   discordAdapter: DiscordAdapter | null;
+  personality: PersonalityStore;
 };
 
 type AdapterBundle = { adapters: BaseAdapter[]; discordAdapter: DiscordAdapter | null };
@@ -88,6 +89,7 @@ async function main() {
 
   const episodic = new EpisodicStore(drizzleDb);
   const profile = new ProfileStore(drizzleDb);
+  const personality = new PersonalityStore(config.daemon.agentName);
 
   const poolConfig = await buildModelPool(config);
   if (poolConfig.fast.length === 0 && poolConfig.capable.length === 0) {
@@ -130,6 +132,7 @@ async function main() {
     tools,
     { systemPrompt: buildSystemPrompt(config), name: config.daemon.agentName },
     profile,
+    personality,
   );
 
   const { adapters, discordAdapter } = await buildAdapters(config);
@@ -153,7 +156,7 @@ async function main() {
     });
   }
 
-  const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter };
+  const ctx: ApiContext = { config, agent, profile, episodic, discordAdapter, personality };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
     logger.info(`API server on http://localhost:${config.daemon.port}`);
@@ -407,6 +410,30 @@ function createApiServer(ctx: ApiContext) {
         if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
         ctx.config = updated;
         return json(res, 200, { ok: true, config: updated.budget });
+      }
+
+      // ── GET /api/personality ───────────────────────────────────────────────
+      if (path === "/api/personality" && req.method === "GET") {
+        return json(res, 200, {
+          content: ctx.personality.loadOrSeed(),
+          path: ctx.personality.path,
+        });
+      }
+
+      // ── PATCH /api/personality ─────────────────────────────────────────────
+      if (path === "/api/personality" && req.method === "PATCH") {
+        const body = (await readBody(req)) as { content?: string };
+        if (typeof body.content !== "string" || !body.content.trim()) {
+          return json(res, 400, { error: "content is required" });
+        }
+        ctx.personality.save(body.content);
+        return json(res, 200, { ok: true, content: ctx.personality.load() });
+      }
+
+      // ── POST /api/personality/reset ────────────────────────────────────────
+      if (path === "/api/personality/reset" && req.method === "POST") {
+        ctx.personality.reset();
+        return json(res, 200, { ok: true, content: ctx.personality.load() });
       }
 
       // ── Static web UI ──────────────────────────────────────────────────────

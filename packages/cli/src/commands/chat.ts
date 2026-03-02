@@ -20,7 +20,7 @@ import {
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue } from "@adam/core";
+import { Agent, TaskQueue, PersonalityStore } from "@adam/core";
 import {
   webFetchTool,
   readFileTool,
@@ -69,6 +69,7 @@ export function registerChatCommand(program: Command): void {
 
       let agent: Agent;
       let profile!: ProfileStore;
+      let personality!: PersonalityStore;
 
       try {
         const dataDir = join(homedir(), ADAM_HOME_DIR, "data");
@@ -78,6 +79,7 @@ export function registerChatCommand(program: Command): void {
         const auditLog = new AuditLog(rawDb);
         const episodic = new EpisodicStore(drizzleDb);
         profile = new ProfileStore(drizzleDb);
+        personality = new PersonalityStore(config.daemon.agentName);
 
         const poolConfig = await buildModelPool(config);
 
@@ -127,17 +129,22 @@ export function registerChatCommand(program: Command): void {
         agent = new Agent(router, queue, episodic, tools, {
           systemPrompt: buildSystemPrompt(config),
           name: config.daemon.agentName,
-        }, profile);
+        }, profile, personality);
 
         const factCount = profile.getAll().length;
+        const hasPersonality = personality.exists();
         const memoryNote = factCount > 0
           ? chalk.gray(`  ·  `) + chalk.cyan(`${factCount} memories`)
+          : "";
+        const personalityNote = hasPersonality
+          ? chalk.gray(`  ·  `) + chalk.magenta(`personality loaded`)
           : "";
         initSpinner.succeed(
           chalk.green("Ready") +
             chalk.gray("  ·  ") +
             chalk.gray(describePool(poolConfig)) +
-            memoryNote,
+            memoryNote +
+            personalityNote,
         );
       } catch (e: unknown) {
         initSpinner.fail(
@@ -151,7 +158,7 @@ export function registerChatCommand(program: Command): void {
       console.log("");
 
       // ── Chat REPL ─────────────────────────────────────────────────────────────
-      await runRepl(chalk, ora, agent, config, profile);
+      await runRepl(chalk, ora, agent, config, profile, personality);
     });
 }
 
@@ -163,6 +170,7 @@ async function runRepl(
   agent: Agent,
   config: AdamConfig,
   profile: ProfileStore,
+  personality: PersonalityStore,
 ): Promise<void> {
   const sessionId = generateSessionId();
   const agentName = config.daemon.agentName;
@@ -183,6 +191,8 @@ async function runRepl(
     `  ${chalk.white("/remember <key> = <value>")} — manually store a fact`,
     `  ${chalk.white("/forget <key>")}             — delete a specific memory`,
     `  ${chalk.white("/forget all")}               — clear all profile memory`,
+    `  ${chalk.white("/personality")}              — view Adam's personality profile`,
+    `  ${chalk.white("/personality reset")}        — reset personality to defaults`,
     `  ${chalk.white("/clear")}                    — clear the screen`,
     `  ${chalk.white("/exit")}                     — end the session`,
     "",
@@ -275,6 +285,37 @@ async function runRepl(
             ? chalk.green(`\n  Forgotten: ${arg}\n`)
             : chalk.gray(`\n  No memory found for key: ${arg}\n`),
         );
+      }
+      ask();
+      return;
+    }
+
+    if (input.startsWith("/personality")) {
+      const arg = input.slice("/personality".length).trim();
+      if (arg === "reset") {
+        personality.reset();
+        console.log(chalk.green("\n  Personality reset to defaults.\n"));
+        console.log(chalk.gray(`  File: ${personality.path}\n`));
+      } else {
+        const content = personality.loadOrSeed();
+        console.log("");
+        console.log(chalk.bold("  Personality Profile") + chalk.gray(`  (${personality.path})`));
+        console.log(chalk.gray("  ─────────────────────────────────────────────────"));
+        const lines = content.split("\n");
+        for (const line of lines) {
+          if (line.startsWith("## ")) {
+            console.log(chalk.bold.cyan(`  ${line}`));
+          } else if (line.startsWith("# ")) {
+            console.log(chalk.bold.white(`  ${line}`));
+          } else if (line.startsWith("- ")) {
+            console.log(chalk.gray("  ") + chalk.white(line));
+          } else if (line.startsWith("*") && line.endsWith("*")) {
+            console.log(chalk.gray(`  ${line}`));
+          } else {
+            console.log(`  ${line}`);
+          }
+        }
+        console.log(chalk.gray("\n  Edit this file directly, or just tell me how you want me to be different.\n"));
       }
       ask();
       return;

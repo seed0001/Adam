@@ -392,6 +392,107 @@ function BudgetSection({ initial }: { initial: BudgetConfig }) {
   );
 }
 
+function PersonalitySection() {
+  const [content, setContent] = useState<string | null>(null);
+  const [filePath, setFilePath] = useState<string>("");
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.getPersonality();
+      setContent(data.content);
+      setDraft(data.content);
+      setFilePath(data.path);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api.patchPersonality(draft);
+      setContent(res.content);
+      setDraft(res.content);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const reset = async () => {
+    if (!confirm("Reset personality to built-in defaults? This cannot be undone.")) return;
+    setResetting(true);
+    try {
+      const res = await api.resetPersonality();
+      setContent(res.content);
+      setDraft(res.content);
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const isDirty = draft !== content;
+
+  return (
+    <Section title="Personality Profile">
+      <div className="space-y-3">
+        <p className="text-xs text-zinc-500 leading-relaxed">
+          This file is injected into every conversation and defines who Adam is.
+          You can edit it directly here, or just tell Adam how you want him to behave in chat — he'll update it himself.
+        </p>
+
+        {filePath && (
+          <p className="text-xs text-zinc-700 font-mono">{filePath}</p>
+        )}
+
+        {loading ? (
+          <p className="text-xs text-zinc-600 py-4 text-center">Loading…</p>
+        ) : error ? (
+          <p className="text-xs text-red-400">{error}</p>
+        ) : (
+          <textarea
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); setSaved(false); }}
+            rows={24}
+            spellCheck={false}
+            className="w-full bg-[#0a0a0a] border border-[#242424] rounded-lg px-3 py-2.5 text-xs text-zinc-300 placeholder-zinc-700 focus:outline-none focus:border-[#333] transition-colors resize-none font-mono leading-relaxed"
+            placeholder="Personality profile will be generated here…"
+          />
+        )}
+
+        <div className="flex items-center justify-between pt-1">
+          <button
+            onClick={() => void reset()}
+            disabled={resetting}
+            className="text-xs text-zinc-600 hover:text-red-400 disabled:opacity-40 transition-colors"
+          >
+            {resetting ? "Resetting…" : "Reset to defaults"}
+          </button>
+          <div className="flex items-center gap-3">
+            {isDirty && !saved && (
+              <span className="text-xs text-zinc-600">Unsaved changes</span>
+            )}
+            <SaveButton onClick={() => void save()} saving={saving} saved={saved} />
+          </div>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -450,8 +551,9 @@ export default function Settings() {
         </button>
       </div>
 
-      <DiscordSection initial={config.discord} />
+      <PersonalitySection />
       <AgentSection initial={config.daemon} />
+      <DiscordSection initial={config.discord} />
       <BudgetSection initial={config.budget} />
     </div>
   );
