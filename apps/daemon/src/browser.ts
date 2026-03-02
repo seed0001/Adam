@@ -40,11 +40,22 @@ export class BrowserSession {
 
   async getPage(): Promise<Page> {
     if (!this.browser || !this.browser.isConnected()) {
-      logger.info(`Launching Chromium (headless=${this.headless})`);
-      this.browser = await chromium.launch({
-        headless: this.headless,
-        args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      });
+      // Use installed Google Chrome instead of Chromium — Google blocks automation
+      // and rejects Chromium as "not secure" for sign-in. Real Chrome passes.
+      try {
+        logger.info("Launching Google Chrome (channel=chrome)");
+        this.browser = await chromium.launch({
+          channel: "chrome",
+          headless: this.headless,
+          args: ["--disable-blink-features=AutomationControlled"],
+        });
+      } catch {
+        logger.warn("Chrome not found, falling back to Chromium — Google sign-in may be blocked");
+        this.browser = await chromium.launch({
+          headless: this.headless,
+          args: ["--no-sandbox", "--disable-dev-shm-usage"],
+        });
+      }
     }
     if (!this.page || this.page.isClosed()) {
       this.page = await this.browser.newPage();
