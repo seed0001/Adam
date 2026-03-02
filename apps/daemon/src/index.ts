@@ -44,9 +44,14 @@ import {
   shellTool,
   createCodeTools,
 } from "@adam/skills";
+import { BrowserSession } from "./browser.js";
 import type { CoreTool } from "ai";
 
 const logger = createLogger("daemon");
+
+// Single browser session — lazy-started on first tool call, reused for the daemon's lifetime.
+// Headed (visible) so the user can watch Adam navigate in real time.
+const browserSession = new BrowserSession(false);
 
 addLogHandler((entry: LogEntry) => {
   const prefix = entry.context ? `[${entry.context}]` : "";
@@ -254,6 +259,145 @@ async function main() {
     logger.info(`Code tools active (no coder model set, falling back to capable) — workspace: ${workspace}`);
   }
 
+  // ── Browser tools ─────────────────────────────────────────────────────────
+  // Playwright-backed real browser (headed, visible to user).
+  // One persistent session per daemon run — navigate, click, type, read, screenshot.
+
+  tools.set(
+    "browser_navigate",
+    tool({
+      description:
+        "Open a URL in a real Chromium browser window (visible on screen) and return the page title and text content. " +
+        "Use this instead of web_fetch for JavaScript-heavy sites, login flows, interactive pages, or any time you need to actually browse. " +
+        "The browser will pop up on the user's screen.",
+      parameters: z.object({
+        url: z.string().describe("Full URL to navigate to (include https://)"),
+      }),
+      execute: async ({ url }) => browserSession.navigate(url),
+    }),
+  );
+
+  tools.set(
+    "browser_click",
+    tool({
+      description:
+        "Click an element on the current browser page. " +
+        "Provide either a CSS selector (e.g. '#submit', 'button.login') or the visible text of the element (e.g. 'Sign In', 'Next'). " +
+        "Returns the updated page content after the click.",
+      parameters: z.object({
+        selectorOrText: z
+          .string()
+          .describe("CSS selector or visible text label of the element to click"),
+      }),
+      execute: async ({ selectorOrText }) => browserSession.click(selectorOrText),
+    }),
+  );
+
+  tools.set(
+    "browser_type",
+    tool({
+      description:
+        "Type text into an input field on the current browser page. " +
+        "Use a CSS selector for the target field (e.g. 'input[name=\"q\"]', '#email', 'textarea'). " +
+        "Set submit=true to press Enter after typing (useful for search boxes).",
+      parameters: z.object({
+        selector: z.string().describe("CSS selector for the input or textarea"),
+        text: z.string().describe("Text to type"),
+        submit: z
+          .boolean()
+          .default(false)
+          .describe("Press Enter after typing (default false)"),
+      }),
+      execute: async ({ selector, text, submit }) => browserSession.type(selector, text, submit),
+    }),
+  );
+
+  tools.set(
+    "browser_content",
+    tool({
+      description:
+        "Get the current page's visible text content without navigating anywhere. " +
+        "Use this after clicking or interacting to read what changed on the page.",
+      parameters: z.object({}),
+      execute: async () => browserSession.getContent(),
+    }),
+  );
+
+  tools.set(
+    "browser_screenshot",
+    tool({
+      description:
+        "Take a screenshot of the current browser page and save it to the workspace. " +
+        "Useful for capturing results, confirming state, or sharing what the browser is showing.",
+      parameters: z.object({
+        filename: z
+          .string()
+          .optional()
+          .describe("Filename for the screenshot (e.g. 'result.png'). Saved to workspace."),
+      }),
+      execute: async ({ filename }) => {
+        const path = filename
+          ? join(workspace, filename)
+          : join(workspace, `screenshot-${Date.now()}.png`);
+        return browserSession.screenshot(path);
+      },
+    }),
+  );
+
+  tools.set(
+    "browser_scroll",
+    tool({
+      description: "Scroll the current browser page up or down to reveal more content.",
+      parameters: z.object({
+        direction: z.enum(["up", "down"]),
+        pixels: z
+          .number()
+          .int()
+          .min(100)
+          .max(5000)
+          .default(600)
+          .describe("How many pixels to scroll"),
+      }),
+      execute: async ({ direction, pixels }) => browserSession.scroll(direction, pixels),
+    }),
+  );
+
+  tools.set(
+    "browser_back",
+    tool({
+      description: "Navigate back to the previous page in the browser history.",
+      parameters: z.object({}),
+      execute: async () => browserSession.goBack(),
+    }),
+  );
+
+  tools.set(
+    "browser_new_tab",
+    tool({
+      description:
+        "Open a new browser tab, optionally navigating to a URL. " +
+        "Use this to open a second page without losing the current one.",
+      parameters: z.object({
+        url: z.string().optional().describe("URL to open in the new tab (optional)"),
+      }),
+      execute: async ({ url }) => browserSession.newTab(url),
+    }),
+  );
+
+  tools.set(
+    "browser_close",
+    tool({
+      description: "Close the browser session when you are completely done browsing.",
+      parameters: z.object({}),
+      execute: async () => {
+        await browserSession.close();
+        return { closed: true };
+      },
+    }),
+  );
+
+  logger.info("Browser tools registered (browser_navigate, browser_click, browser_type, browser_content, browser_screenshot, browser_scroll, browser_back, browser_new_tab, browser_close)");
+
   const agent = new Agent(
     router,
     queue,
@@ -315,6 +459,7 @@ async function main() {
     logger.info(`${signal} received — shutting down`);
     consolidator.stop();
     for (const adapter of adapters) await adapter.stop().catch(() => {});
+    await browserSession.close().catch(() => {});
     server.close();
     process.exit(0);
   };
@@ -1042,6 +1187,18 @@ Tools you have right now — use them:
 - read_discord_dm: read recent DM history with a Discord user by username or user ID — use this to check if someone replied
 - read_discord_messages: read recent messages from a Discord channel by channel ID
 - list_discord_channels: list all Discord guilds and channels the bot is connected to
+
+Browser tools — a real visible Chromium browser that runs on this machine:
+- browser_navigate: open any URL in a real browser window (pops up on screen); returns page title and content
+- browser_click: click any element on the current page by CSS selector or visible text
+- browser_type: type text into any input field; set submit=true to press Enter
+- browser_content: read the current page content without navigating
+- browser_screenshot: take a screenshot of the current page and save to workspace
+- browser_scroll: scroll the page up or down
+- browser_back: go back in browser history
+- browser_new_tab: open a new browser tab
+- browser_close: close the browser when done
+IMPORTANT: Always use browser tools when the user asks to "browse", "look up", "open a site", "navigate to", or when web_fetch would not work (JS-heavy pages, logins, etc.).
 
 Code tools — your division of labor with a local code model:
 You are the senior engineer / tech lead. You decide WHAT to build and WHY. You never write raw implementation code yourself.
