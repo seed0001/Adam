@@ -1,0 +1,30 @@
+{
+  "name": "@adam/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "dev": "node --watch-path=../../packages dist/index.js",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@adam/shared": "workspace:*",
+    "@adam/core": "workspace:*",
+    "@adam/memory": "workspace:*",
+    "@adam/models": "workspace:*",
+    "@adam/security": "workspace:*",
+    "@adam/adapters": "workspace:*",
+    "@adam/skills": "workspace:*",
+    "@adam/voice": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "rimraf": "^6.0.0",
+    "tsup": "^8.0.0"
+  }
+}

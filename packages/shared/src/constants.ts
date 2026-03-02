@@ -1,0 +1,31 @@
+export const ADAM_VERSION = "0.1.0";
+
+export const ADAM_HOME_DIR = ".adam";
+
+export const PORTS = {
+  DAEMON: 18800,
+  VOICE_SIDECAR: 18799,
+} as const;
+
+export const TIMEOUTS = {
+  SKILL_DEFAULT_MS: 30_000,
+  SKILL_MAX_MS: 300_000,
+  VOICE_SIDECAR_STARTUP_MS: 30_000,
+  VOICE_SYNTHESIS_MS: 60_000,
+  MODEL_CALL_MS: 120_000,
+  ADAPTER_RECONNECT_MS: 5_000,
+} as const;
+
+export const MEMORY = {
+  CONTEXT_WINDOW_MAX_TOKENS: 100_000,
+  SEMANTIC_SEARCH_TOP_K: 20,
+  SEMANTIC_WEIGHT: 0.7,
+  KEYWORD_WEIGHT: 0.3,
+  EPISODIC_RETENTION_DAYS: 365,
+} as const;
+
+export const LUXTTS = {
+  MODEL_REPO: "YatharthS/LuxTTS",
+  SAMPLE_RATE: 48_000,
+  MIN_REF_AUDIO_DURATION_S: 3,
+} as const;

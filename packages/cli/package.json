@@ -1,0 +1,45 @@
+{
+  "name": "@adam/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "adam": "./dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/bin.ts src/index.ts --format esm --dts --clean",
+    "dev": "tsup src/bin.ts --format esm --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@adam/shared": "workspace:*",
+    "@adam/security": "workspace:*",
+    "@adam/memory": "workspace:*",
+    "@adam/models": "workspace:*",
+    "@adam/core": "workspace:*",
+    "@adam/skills": "workspace:*",
+    "@adam/voice": "workspace:*",
+    "ai": "^4.0.0",
+    "commander": "^13.0.0",
+    "inquirer": "^12.0.0",
+    "chalk": "^5.0.0",
+    "ora": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/inquirer": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "rimraf": "^6.0.0",
+    "tsup": "^8.0.0"
+  }
+}

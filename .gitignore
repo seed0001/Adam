@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.turbo/
+*.env
+*.env.*
+!*.env.example
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+
+# Adam runtime data (never commit user data)
+~/.adam/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
