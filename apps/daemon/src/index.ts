@@ -153,6 +153,26 @@ async function main() {
     );
 
     tools.set(
+      "send_discord_dm",
+      tool({
+        description:
+          "Send a direct message (DM) to a Discord user by their username or numeric user ID. " +
+          "The bot must share at least one server with the user. " +
+          "Try the username first (e.g. 'solonaras2'). If that fails, ask the user for their numeric ID. " +
+          "Always confirm with the user before sending unless explicitly told not to.",
+        parameters: z.object({
+          usernameOrId: z
+            .string()
+            .describe("Discord username (e.g. solonaras2) or numeric snowflake user ID"),
+          content: z.string().describe("The message to send"),
+        }),
+        execute: async ({ usernameOrId, content }) => {
+          return await discordAdapter.dmUser(usernameOrId, content);
+        },
+      }),
+    );
+
+    tools.set(
       "send_discord_message",
       tool({
         description:
@@ -171,7 +191,7 @@ async function main() {
       }),
     );
 
-    logger.info("Discord outbound tools registered (send_discord_message, list_discord_channels)");
+    logger.info("Discord outbound tools registered (send_discord_dm, send_discord_message, list_discord_channels)");
   }
 
   // Code tools — model-backed, routed to the coder tier (DeepSeek Coder / Qwen2.5-Coder).
@@ -970,6 +990,7 @@ Tools you have right now — use them:
 - list_directory: list files and folders at any path on this machine
 - shell: run any shell command on this machine
 - send_discord_message: post a message to a Discord channel by channel ID
+- send_discord_dm: send a direct message to a Discord user by username or numeric user ID (bot must share a server with them)
 - list_discord_channels: list all Discord guilds and channels the bot is connected to
 
 Code tools — your division of labor with a local code model:

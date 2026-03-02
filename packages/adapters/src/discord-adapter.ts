@@ -140,6 +140,54 @@ export class DiscordAdapter extends BaseAdapter {
   }
 
   /**
+   * Send a direct message to a Discord user by username or numeric user ID.
+   *
+   * Resolution order:
+   *  1. If the input looks like a snowflake (17-20 digits), fetch the user directly.
+   *  2. Otherwise, search every shared guild for a member whose username or display
+   *     name matches (case-insensitive, discriminator stripped). First exact match wins.
+   *
+   * Requires the bot to share at least one server with the target user.
+   */
+  async dmUser(usernameOrId: string, content: string): Promise<{ username: string; userId: string }> {
+    if (!this.client) throw new Error("Discord client not started");
+
+    // Fast path: numeric user ID
+    if (/^\d{17,20}$/.test(usernameOrId.trim())) {
+      const user = await this.client.users.fetch(usernameOrId.trim());
+      const chunks = splitMessage(content, this.config.maxMessageLength);
+      for (const chunk of chunks) await user.send(chunk);
+      return { username: user.username, userId: user.id };
+    }
+
+    // Username search — strip legacy #discriminator if present
+    const query = usernameOrId.trim().toLowerCase().replace(/#\d{1,4}$/, "");
+
+    for (const guild of this.client.guilds.cache.values()) {
+      let members;
+      try {
+        members = await guild.members.search({ query, limit: 10 });
+      } catch {
+        continue;
+      }
+      for (const member of members.values()) {
+        const uname = member.user.username.toLowerCase();
+        const display = member.displayName.toLowerCase();
+        if (uname === query || display === query || uname.startsWith(query)) {
+          const chunks = splitMessage(content, this.config.maxMessageLength);
+          for (const chunk of chunks) await member.user.send(chunk);
+          return { username: member.user.username, userId: member.user.id };
+        }
+      }
+    }
+
+    throw new Error(
+      `Could not find user "${usernameOrId}" in any shared server. ` +
+      `Make sure the bot shares a server with them, or provide their numeric user ID.`,
+    );
+  }
+
+  /**
    * Returns every guild the bot is in with its sendable text channels.
    * Used by the list_discord_channels tool so Adam can look up channel IDs.
    */
