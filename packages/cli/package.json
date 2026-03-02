@@ -33,7 +33,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "tsup src/bin.ts src/index.ts --format esm --dts --clean",
+    "build": "tsup --config tsup.config.ts",
     "build:publish": "tsup --config tsup.publish.config.ts",
     "prepublishOnly": "pnpm build:publish",
     "dev": "tsup src/bin.ts --format esm --watch",
