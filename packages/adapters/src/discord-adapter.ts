@@ -188,6 +188,82 @@ export class DiscordAdapter extends BaseAdapter {
   }
 
   /**
+   * Fetch recent messages from a DM conversation with a user.
+   * Resolves the user the same way dmUser() does (snowflake or username search),
+   * then opens (or re-opens) the DM channel and returns the last N messages.
+   */
+  async readDmHistory(
+    usernameOrId: string,
+    limit = 20,
+  ): Promise<{ username: string; userId: string; messages: Array<{ author: string; content: string; timestamp: string }> }> {
+    if (!this.client) throw new Error("Discord client not started");
+
+    let userId: string;
+    let username: string;
+
+    if (/^\d{17,20}$/.test(usernameOrId.trim())) {
+      const user = await this.client.users.fetch(usernameOrId.trim());
+      userId = user.id;
+      username = user.username;
+    } else {
+      const query = usernameOrId.trim().toLowerCase().replace(/#\d{1,4}$/, "");
+      let found = false;
+      userId = "";
+      username = "";
+      for (const guild of this.client.guilds.cache.values()) {
+        let members;
+        try { members = await guild.members.search({ query, limit: 10 }); } catch { continue; }
+        for (const member of members.values()) {
+          const uname = member.user.username.toLowerCase();
+          const display = member.displayName.toLowerCase();
+          if (uname === query || display === query || uname.startsWith(query)) {
+            userId = member.user.id;
+            username = member.user.username;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+      if (!found) throw new Error(`Could not find user "${usernameOrId}" in any shared server.`);
+    }
+
+    const user = await this.client.users.fetch(userId);
+    const dmChannel = await user.createDM();
+    const fetched = await dmChannel.messages.fetch({ limit: Math.min(limit, 100) });
+    const messages = [...fetched.values()]
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+      .map((m) => ({
+        author: m.author.username,
+        content: m.content,
+        timestamp: m.createdAt.toISOString(),
+      }));
+
+    return { username, userId, messages };
+  }
+
+  /**
+   * Fetch recent messages from any text channel by ID.
+   */
+  async readChannelMessages(
+    channelId: string,
+    limit = 20,
+  ): Promise<{ channelId: string; messages: Array<{ author: string; content: string; timestamp: string }> }> {
+    if (!this.client) throw new Error("Discord client not started");
+    const channel = await this.client.channels.fetch(channelId);
+    if (!isSendable(channel)) throw new Error(`Channel ${channelId} is not a readable text channel`);
+    const fetched = await (channel as TextChannel).messages.fetch({ limit: Math.min(limit, 100) });
+    const messages = [...fetched.values()]
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+      .map((m) => ({
+        author: m.author.username,
+        content: m.content,
+        timestamp: m.createdAt.toISOString(),
+      }));
+    return { channelId, messages };
+  }
+
+  /**
    * Returns every guild the bot is in with its sendable text channels.
    * Used by the list_discord_channels tool so Adam can look up channel IDs.
    */

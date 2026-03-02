@@ -173,6 +173,54 @@ async function main() {
     );
 
     tools.set(
+      "read_discord_dm",
+      tool({
+        description:
+          "Read the recent DM conversation history between the bot and a Discord user. " +
+          "Use this to check if someone replied, see what was said, or get context before responding. " +
+          "Accepts a username (e.g. solonaras2) or numeric user ID.",
+        parameters: z.object({
+          usernameOrId: z
+            .string()
+            .describe("Discord username or numeric snowflake user ID"),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .default(20)
+            .describe("Number of recent messages to fetch (default 20, max 50)"),
+        }),
+        execute: async ({ usernameOrId, limit }) => {
+          return await discordAdapter.readDmHistory(usernameOrId, limit);
+        },
+      }),
+    );
+
+    tools.set(
+      "read_discord_messages",
+      tool({
+        description:
+          "Read recent messages from a Discord channel. " +
+          "Use list_discord_channels first if you don't know the channel ID. " +
+          "Useful for catching up on activity or checking if someone replied in a channel.",
+        parameters: z.object({
+          channelId: z.string().describe("The Discord channel ID to read from"),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .default(20)
+            .describe("Number of recent messages to fetch (default 20, max 50)"),
+        }),
+        execute: async ({ channelId, limit }) => {
+          return await discordAdapter.readChannelMessages(channelId, limit);
+        },
+      }),
+    );
+
+    tools.set(
       "send_discord_message",
       tool({
         description:
@@ -191,7 +239,7 @@ async function main() {
       }),
     );
 
-    logger.info("Discord outbound tools registered (send_discord_dm, send_discord_message, list_discord_channels)");
+    logger.info("Discord tools registered (send_discord_dm, send_discord_message, read_discord_dm, read_discord_messages, list_discord_channels)");
   }
 
   // Code tools — model-backed, routed to the coder tier (DeepSeek Coder / Qwen2.5-Coder).
@@ -990,7 +1038,9 @@ Tools you have right now — use them:
 - list_directory: list files and folders at any path on this machine
 - shell: run any shell command on this machine
 - send_discord_message: post a message to a Discord channel by channel ID
-- send_discord_dm: send a direct message to a Discord user by username or numeric user ID (bot must share a server with them)
+- send_discord_dm: send a direct message to a Discord user by username or numeric user ID
+- read_discord_dm: read recent DM history with a Discord user by username or user ID — use this to check if someone replied
+- read_discord_messages: read recent messages from a Discord channel by channel ID
 - list_discord_channels: list all Discord guilds and channels the bot is connected to
 
 Code tools — your division of labor with a local code model:
