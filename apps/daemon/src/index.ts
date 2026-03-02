@@ -176,13 +176,14 @@ async function main() {
 
   // Code tools — model-backed, routed to the coder tier (DeepSeek Coder / Qwen2.5-Coder).
   // Falls back to capable if no dedicated coder model is configured.
-  // Uses a placeholder session ID here; each tool call will inherit the active session.
-  const codeTools = createCodeTools(router, generateId());
+  // Relative paths in code tools resolve against the workspace directory.
+  const workspace = resolveWorkspace(config);
+  const codeTools = createCodeTools(router, generateId(), workspace);
   for (const [name, t] of codeTools) tools.set(name, t);
   if (poolConfig.coder.length > 0) {
-    logger.info(`Code tools active with coder model: ${poolConfig.coder[0]?.model ?? "unknown"}`);
+    logger.info(`Code tools active — coder: ${poolConfig.coder[0]?.model ?? "unknown"}, workspace: ${workspace}`);
   } else {
-    logger.info("Code tools active (falling back to capable tier — set ollama.models.coder for dedicated model)");
+    logger.info(`Code tools active (no coder model set, falling back to capable) — workspace: ${workspace}`);
   }
 
   const agent = new Agent(
@@ -807,6 +808,7 @@ function buildSystemPrompt(config: AdamConfig): string {
   }
 
   const name = config.daemon.agentName;
+  const workspace = resolveWorkspace(config);
 
   const activeAdapters: string[] = [];
   if (config.adapters.telegram?.enabled) activeAdapters.push("Telegram");
@@ -823,6 +825,7 @@ What you are:
 - You run as a background daemon and power integrations across multiple interfaces
 - Your active messaging adapters: ${activeAdapters.length > 0 ? activeAdapters.join(", ") : "none configured — run adam init to add Discord or Telegram"}
 - You have a web dashboard at http://localhost:${config.daemon.port}
+- Your workspace directory is: ${workspace} — ALL projects, apps, and files you create go here unless the user specifies otherwise. Always use absolute paths under this directory. Never use relative paths.
 
 Personality:
 - You are direct. No filler, no "certainly!", no "great question!", no "I'd be happy to help with that". Just say the thing.
@@ -861,6 +864,10 @@ Rules for tool use:
 - If a tool call fails, report the actual error — not a vague "I can't"
 - Confirm before destructive actions (overwriting files, running shell commands that modify state)
 - No confirmation needed for read-only actions (reading files, listing directories, fetching URLs)`;
+}
+
+function resolveWorkspace(config: AdamConfig): string {
+  return config.daemon.workspace ?? homedir();
 }
 
 void main();

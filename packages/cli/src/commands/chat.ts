@@ -134,7 +134,8 @@ export function registerChatCommand(program: Command): void {
         ]);
 
         // Code tools — cloud model plans, local coder model implements
-        const codeTools = createCodeTools(router, generateSessionId());
+        const workspace = config.daemon.workspace ?? homedir();
+        const codeTools = createCodeTools(router, generateSessionId(), workspace);
         for (const [name, t] of codeTools) tools.set(name, t);
 
         agent = new Agent(router, queue, episodic, tools, {
@@ -733,6 +734,7 @@ function buildSystemPrompt(config: AdamConfig): string {
   }
 
   const name = config.daemon.agentName;
+  const workspace = config.daemon.workspace ?? homedir();
 
   const activeAdapters: string[] = ["CLI (this terminal)"];
   if (config.adapters.telegram?.enabled) activeAdapters.push("Telegram");
@@ -750,6 +752,7 @@ What you are:
 - Your active messaging adapters: ${activeAdapters.join(", ")}
 - You can connect to Discord and Telegram if configured with bot tokens via "adam init"
 - You have a web dashboard at http://localhost:18800 when the daemon is running
+- Your workspace directory is: ${workspace} — ALL projects, apps, and files you create go here unless the user specifies otherwise. Always use absolute paths under this directory. Never use relative paths.
 
 Personality:
 - You are direct. No filler, no "certainly!", no "great question!", no "I'd be happy to help with that". Just say the thing.

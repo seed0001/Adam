@@ -6,7 +6,7 @@ import {
   existsSync,
   mkdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import type { ModelTier, Result, AdamError } from "@adam/shared";
 import type { CoreTool } from "ai";
 
@@ -43,12 +43,21 @@ export interface CoderRouter {
 // The cloud model NEVER touches the filesystem directly through these tools.
 // The local coder model NEVER sees the user's conversation or decides what to build.
 
-export function createCodeTools(router: CoderRouter, sessionId: string): Map<string, CoreTool> {
+/**
+ * Resolve a path: if absolute, use as-is. If relative, resolve against workspace.
+ * This is what prevents "where did Adam put that file?" — all relative paths
+ * anchor to the configured workspace directory.
+ */
+function resolvePath(p: string, workspace: string): string {
+  return isAbsolute(p) ? p : join(workspace, p);
+}
+
+export function createCodeTools(router: CoderRouter, sessionId: string, workspace: string): Map<string, CoreTool> {
   return new Map<string, CoreTool>([
-    ["code_write_file", codeWriteFileTool(router, sessionId)],
-    ["code_edit_file",  codeEditFileTool(router, sessionId)],
-    ["code_scaffold",   codeScaffoldTool(router, sessionId)],
-    ["code_review",     codeReviewTool(router, sessionId)],
+    ["code_write_file", codeWriteFileTool(router, sessionId, workspace)],
+    ["code_edit_file",  codeEditFileTool(router, sessionId, workspace)],
+    ["code_scaffold",   codeScaffoldTool(router, sessionId, workspace)],
+    ["code_review",     codeReviewTool(router, sessionId, workspace)],
   ]);
 }
 
@@ -56,15 +65,16 @@ export function createCodeTools(router: CoderRouter, sessionId: string): Map<str
 // Cloud model describes what the file should do.
 // Local coder writes it.
 
-function codeWriteFileTool(router: CoderRouter, sessionId: string): CoreTool {
+function codeWriteFileTool(router: CoderRouter, sessionId: string, workspace: string): CoreTool {
   return tool({
     description:
       "Write a new file by describing its purpose and requirements. " +
       "You (the planner) specify WHAT the file should do. " +
       "The local code model generates the actual implementation. " +
-      "Use this when you need to create a file you've planned but should not implement yourself.",
+      "Use this when you need to create a file you've planned but should not implement yourself. " +
+      "Relative paths are resolved against the workspace directory.",
     parameters: z.object({
-      path: z.string().describe("Absolute or relative file path to create"),
+      path: z.string().describe("File path to create. Relative paths resolve against the workspace directory."),
       description: z.string().describe(
         "What this file should do, its interface, key behaviors, and any constraints. " +
         "Be specific about function signatures, exports, and edge cases."
@@ -75,6 +85,7 @@ function codeWriteFileTool(router: CoderRouter, sessionId: string): CoreTool {
       ),
     }),
     execute: async ({ path, description, language, context }) => {
+      const resolvedPath = resolvePath(path, workspace);
       const lang = language ?? inferLanguage(path);
       const contextBlock = context
         ? `\n\nContext from the codebase:\n\`\`\`\n${context.slice(0, 2000)}\n\`\`\``
@@ -86,7 +97,7 @@ function codeWriteFileTool(router: CoderRouter, sessionId: string): CoreTool {
         system: coderSystemPrompt(),
         prompt:
           `Write the complete contents of a ${lang} file.\n\n` +
-          `File path: ${path}\n\n` +
+          `File path: ${resolvedPath}\n\n` +
           `Requirements:\n${description}` +
           contextBlock +
           `\n\nReturn ONLY the file contents. No explanation, no markdown fences, no preamble.`,
@@ -97,13 +108,13 @@ function codeWriteFileTool(router: CoderRouter, sessionId: string): CoreTool {
       }
 
       const content = stripCodeFences(result.value);
-      ensureDir(path);
-      writeFileSync(path, content, "utf-8");
+      ensureDir(resolvedPath);
+      writeFileSync(resolvedPath, content, "utf-8");
       const lines = content.split("\n").length;
 
       return {
         success: true,
-        path,
+        path: resolvedPath,
         lines_written: lines,
         preview: content.slice(0, 300),
       };
@@ -115,7 +126,7 @@ function codeWriteFileTool(router: CoderRouter, sessionId: string): CoreTool {
 // Cloud model describes what to change.
 // Local coder reads the file, applies the change, returns the diff.
 
-function codeEditFileTool(router: CoderRouter, sessionId: string): CoreTool {
+function codeEditFileTool(router: CoderRouter, sessionId: string, workspace: string): CoreTool {
   return tool({
     description:
       "Edit an existing file by describing the change you want made. " +
@@ -130,11 +141,12 @@ function codeEditFileTool(router: CoderRouter, sessionId: string): CoreTool {
       ),
     }),
     execute: async ({ path, instruction }) => {
-      if (!existsSync(path)) {
-        return { success: false, error: `File not found: ${path}` };
+      const resolvedPath = resolvePath(path, workspace);
+      if (!existsSync(resolvedPath)) {
+        return { success: false, error: `File not found: ${resolvedPath}` };
       }
 
-      const original = readFileSync(path, "utf-8");
+      const original = readFileSync(resolvedPath, "utf-8");
       const lang = inferLanguage(path);
 
       const result = await router.generate({
@@ -143,7 +155,7 @@ function codeEditFileTool(router: CoderRouter, sessionId: string): CoreTool {
         system: coderSystemPrompt(),
         prompt:
           `Edit the following ${lang} file based on the instruction.\n\n` +
-          `File path: ${path}\n\n` +
+          `File path: ${resolvedPath}\n\n` +
           `Instruction: ${instruction}\n\n` +
           `Current file contents:\n\`\`\`${lang}\n${original}\n\`\`\`\n\n` +
           `Return ONLY the complete updated file contents. No explanation, no markdown fences.`,
@@ -154,7 +166,7 @@ function codeEditFileTool(router: CoderRouter, sessionId: string): CoreTool {
       }
 
       const updated = stripCodeFences(result.value);
-      writeFileSync(path, updated, "utf-8");
+      writeFileSync(resolvedPath, updated, "utf-8");
 
       const beforeLines = original.split("\n").length;
       const afterLines = updated.split("\n").length;
@@ -162,7 +174,7 @@ function codeEditFileTool(router: CoderRouter, sessionId: string): CoreTool {
 
       return {
         success: true,
-        path,
+        path: resolvedPath,
         before_lines: beforeLines,
         after_lines: afterLines,
         delta: afterLines - beforeLines,
@@ -177,7 +189,7 @@ function codeEditFileTool(router: CoderRouter, sessionId: string): CoreTool {
 // Cloud model provides a project spec.
 // Local coder generates the file tree, one file at a time.
 
-function codeScaffoldTool(router: CoderRouter, sessionId: string): CoreTool {
+function codeScaffoldTool(router: CoderRouter, sessionId: string, workspace: string): CoreTool {
   return tool({
     description:
       "Scaffold a new project or directory structure from a specification. " +
@@ -185,7 +197,7 @@ function codeScaffoldTool(router: CoderRouter, sessionId: string): CoreTool {
       "The local code model generates each file. " +
       "Returns a list of created files.",
     parameters: z.object({
-      directory: z.string().describe("Root directory to scaffold into (will be created if it doesn't exist)"),
+      directory: z.string().describe("Root directory to scaffold into. Relative paths resolve against the workspace directory."),
       spec: z.string().describe(
         "Complete project specification: purpose, tech stack, architecture, list of files with descriptions. " +
         "Be explicit about the file tree — the coder will generate exactly what you list."
@@ -196,13 +208,14 @@ function codeScaffoldTool(router: CoderRouter, sessionId: string): CoreTool {
       })).describe("Explicit list of files to create"),
     }),
     execute: async ({ directory, spec, file_list }) => {
-      if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
+      const resolvedDir = resolvePath(directory, workspace);
+      if (!existsSync(resolvedDir)) mkdirSync(resolvedDir, { recursive: true });
 
       const created: string[] = [];
       const errors: string[] = [];
 
       for (const file of file_list) {
-        const fullPath = join(directory, file.path);
+        const fullPath = join(resolvedDir, file.path);
         const lang = inferLanguage(file.path);
 
         const result = await router.generate({
@@ -229,7 +242,7 @@ function codeScaffoldTool(router: CoderRouter, sessionId: string): CoreTool {
 
       return {
         success: errors.length === 0,
-        directory,
+        directory: resolvedDir,
         created,
         errors,
         total: file_list.length,
@@ -241,7 +254,7 @@ function codeScaffoldTool(router: CoderRouter, sessionId: string): CoreTool {
 // ── code_review ───────────────────────────────────────────────────────────────
 // Local coder reads and evaluates a file, returns structured assessment.
 
-function codeReviewTool(router: CoderRouter, sessionId: string): CoreTool {
+function codeReviewTool(router: CoderRouter, sessionId: string, workspace: string): CoreTool {
   return tool({
     description:
       "Have the local code model review a file and answer a specific question about it. " +
@@ -252,11 +265,12 @@ function codeReviewTool(router: CoderRouter, sessionId: string): CoreTool {
       question: z.string().describe("Specific question to answer about the code"),
     }),
     execute: async ({ path, question }) => {
-      if (!existsSync(path)) {
-        return { success: false, error: `File not found: ${path}` };
+      const resolvedPath = resolvePath(path, workspace);
+      if (!existsSync(resolvedPath)) {
+        return { success: false, error: `File not found: ${resolvedPath}` };
       }
 
-      const content = readFileSync(path, "utf-8");
+      const content = readFileSync(resolvedPath, "utf-8");
       const lang = inferLanguage(path);
 
       const result = await router.generate({
@@ -266,7 +280,7 @@ function codeReviewTool(router: CoderRouter, sessionId: string): CoreTool {
           "You are a precise code reviewer. Answer the question about the code directly and concisely. " +
           "Flag any bugs, edge cases, or missing logic relevant to the question. Be direct.",
         prompt:
-          `File: ${path}\n\n` +
+          `File: ${resolvedPath}\n\n` +
           `\`\`\`${lang}\n${content.slice(0, 4000)}\n\`\`\`\n\n` +
           `Question: ${question}`,
       });

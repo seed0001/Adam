@@ -89,6 +89,7 @@ export type DaemonConfig = {
   logLevel: "debug" | "info" | "warn" | "error";
   systemPrompt?: string;
   agentName: string;
+  workspace?: string;
 };
 
 export type BudgetConfig = {

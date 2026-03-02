@@ -46,6 +46,7 @@ function Input({
   type = "text",
   min,
   max,
+  monospace = false,
 }: {
   value: string | number;
   onChange: (v: string) => void;
@@ -53,6 +54,7 @@ function Input({
   type?: string;
   min?: number;
   max?: number;
+  monospace?: boolean;
 }) {
   return (
     <input
@@ -62,7 +64,7 @@ function Input({
       placeholder={placeholder}
       min={min}
       max={max}
-      className="w-full bg-[#0f0f0f] border border-[#242424] rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-[#333] transition-colors"
+      className={`w-full bg-[#0f0f0f] border border-[#242424] rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-[#333] transition-colors${monospace ? " font-mono" : ""}`}
     />
   );
 }
@@ -318,6 +320,28 @@ function AgentSection({ initial }: { initial: DaemonConfig }) {
             <option key={l} value={l}>{l}</option>
           ))}
         </select>
+      </Field>
+
+      <Field
+        label="Workspace"
+        hint="Default directory for all projects and files Adam creates. Relative paths in code tools resolve here."
+      >
+        <Input
+          value={cfg.workspace ?? ""}
+          onChange={(v) => set("workspace", v || undefined)}
+          placeholder="e.g. C:\Users\you\Projects"
+          monospace
+        />
+        {cfg.workspace && (
+          <p className="text-xs text-zinc-600 mt-1">
+            Adam will always know to look here first. Set this to avoid losing created files.
+          </p>
+        )}
+        {!cfg.workspace && (
+          <p className="text-xs text-amber-700 mt-1">
+            Not set — falls back to home directory. Files may be hard to find.
+          </p>
+        )}
       </Field>
 
       <Field label="System prompt" hint="Global personality. Overrides the default.">

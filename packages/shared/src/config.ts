@@ -148,6 +148,15 @@ export const DaemonConfigSchema = z.object({
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   systemPrompt: z.string().optional(),
   agentName: z.string().default("Adam"),
+  /**
+   * Default workspace directory — where Adam creates projects and files when
+   * relative paths are used. All code tools and write_file resolve paths
+   * relative to this directory when set. Injected into every system prompt
+   * so Adam always knows where to put things.
+   *
+   * Defaults to the user's home directory if not set.
+   */
+  workspace: z.string().optional(),
 });
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 
