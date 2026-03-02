@@ -34,6 +34,7 @@ export class Agent {
   private classifier: IntentClassifier;
   private planner: Planner;
   private executor: Executor;
+  private readonly startedAt: Date = new Date();
 
   constructor(
     private router: ModelRouter,
@@ -196,7 +197,49 @@ export class Agent {
       }
     }
 
+    // Layer 4: live time context — computed fresh on every turn so it never drifts
+    prompt += `\n\n${this.buildTimeContext()}`;
+
     return prompt;
+  }
+
+  /**
+   * Returns an accurate time block computed at the moment of the call.
+   * Called on every turn so a session open for hours stays correct.
+   */
+  private buildTimeContext(): string {
+    const now = new Date();
+    const date = now.toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+    const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+
+    const hour = now.getHours();
+    let timeOfDay: string;
+    if (hour >= 5 && hour < 12) timeOfDay = "morning";
+    else if (hour >= 12 && hour < 17) timeOfDay = "afternoon";
+    else if (hour >= 17 && hour < 21) timeOfDay = "evening";
+    else timeOfDay = "night";
+
+    const uptimeMs = Date.now() - this.startedAt.getTime();
+    const uptimeMinutes = Math.floor(uptimeMs / 60000);
+    let sessionSpan: string;
+    if (uptimeMinutes < 2) {
+      sessionSpan = "session just started";
+    } else if (uptimeMinutes < 60) {
+      sessionSpan = `session running for ${uptimeMinutes} min`;
+    } else {
+      const h = Math.floor(uptimeMinutes / 60);
+      const m = uptimeMinutes % 60;
+      sessionSpan = m > 0
+        ? `session running for ${h}h ${m}m`
+        : `session running for ${h}h`;
+    }
+
+    return `Current time: ${date}, ${time} (${timeOfDay}). ${sessionSpan}.`;
   }
 
   /**

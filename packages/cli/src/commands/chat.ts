@@ -483,17 +483,8 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(config: AdamConfig): string {
-  const now = new Date();
-  const date = now.toLocaleDateString("en-US", {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-  const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
-
   if (config.daemon.systemPrompt) {
-    return `${config.daemon.systemPrompt}\n\nCurrent date and time: ${date}, ${time}.`;
+    return config.daemon.systemPrompt;
   }
 
   const name = config.daemon.agentName;
@@ -528,9 +519,7 @@ Personality:
 When you act:
 - You think before you do anything destructive.
 - You confirm before writing files, running shell commands, or sending anything.
-- You use tools when it's faster or more accurate than reasoning alone.
-
-Current date and time: ${date}, ${time}.`;
+- You use tools when it's faster or more accurate than reasoning alone.`;
 }
 
 function describePool(pool: ModelPoolConfig): string {
