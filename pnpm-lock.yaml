@@ -59,6 +59,12 @@ importers:
       '@adam/voice':
         specifier: workspace:*
         version: link:../../packages/voice
+      ai:
+        specifier: ^4.3.19
+        version: 4.3.19(react@19.2.4)(zod@3.25.76)
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

@@ -27,6 +27,8 @@ import {
   type ProviderConfig,
 } from "@adam/models";
 import { Agent, TaskQueue, PersonalityStore } from "@adam/core";
+import { tool } from "ai";
+import { z } from "zod";
 import {
   CliAdapter,
   TelegramAdapter,
@@ -117,6 +119,10 @@ async function main() {
   });
 
   const queue = new TaskQueue(rawDb);
+
+  // Build adapters first so we can create Discord tools with a live adapter reference
+  const { adapters, discordAdapter } = await buildAdapters(config);
+
   const tools = new Map<string, CoreTool>([
     ["web_fetch", webFetchTool],
     ["read_file", readFileTool],
@@ -124,6 +130,41 @@ async function main() {
     ["list_directory", listDirectoryTool],
     ["shell", shellTool],
   ]);
+
+  // Discord outbound tools — only available when the Discord adapter is running
+  if (discordAdapter) {
+    tools.set(
+      "list_discord_channels",
+      tool({
+        description:
+          "List every Discord guild and text channel the bot is connected to. " +
+          "Call this first to find channel IDs before posting a message.",
+        parameters: z.object({}),
+        execute: async () => ({ guilds: discordAdapter.listChannels() }),
+      }),
+    );
+
+    tools.set(
+      "send_discord_message",
+      tool({
+        description:
+          "Post a message to a specific Discord channel. " +
+          "Use list_discord_channels first if you don't already know the channel ID. " +
+          "Confirm with the user before sending unless explicitly told not to.",
+        parameters: z.object({
+          channelId: z.string().describe("The Discord channel ID to post to"),
+          content: z.string().describe("The message to send"),
+        }),
+        execute: async ({ channelId, content }) => {
+          await discordAdapter.sendToChannel(channelId, content);
+          logger.info("Outbound Discord message sent", { channelId, length: content.length });
+          return { success: true, channelId, preview: content.slice(0, 120) };
+        },
+      }),
+    );
+
+    logger.info("Discord outbound tools registered (send_discord_message, list_discord_channels)");
+  }
 
   const agent = new Agent(
     router,
@@ -135,7 +176,6 @@ async function main() {
     personality,
   );
 
-  const { adapters, discordAdapter } = await buildAdapters(config);
   for (const adapter of adapters) {
     adapter.on("message", async (message) => {
       const result = await agent.process(message);

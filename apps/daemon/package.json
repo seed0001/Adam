@@ -13,14 +13,16 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "@adam/shared": "workspace:*",
+    "@adam/adapters": "workspace:*",
     "@adam/core": "workspace:*",
     "@adam/memory": "workspace:*",
     "@adam/models": "workspace:*",
     "@adam/security": "workspace:*",
-    "@adam/adapters": "workspace:*",
+    "@adam/shared": "workspace:*",
     "@adam/skills": "workspace:*",
-    "@adam/voice": "workspace:*"
+    "@adam/voice": "workspace:*",
+    "ai": "^4.3.19",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

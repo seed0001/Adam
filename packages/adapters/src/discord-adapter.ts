@@ -130,12 +130,33 @@ export class DiscordAdapter extends BaseAdapter {
     logger.info("Discord adapter stopped");
   }
 
-  private async sendToChannel(channelId: string, content: string): Promise<void> {
+  /** Send a message to any channel by ID. Used by tools and adapter.send(). */
+  async sendToChannel(channelId: string, content: string): Promise<void> {
     if (!this.client) throw new Error("Discord client not started");
     const channel = await this.client.channels.fetch(channelId);
-    if (!isSendable(channel)) throw new Error(`Channel ${channelId} is not sendable`);
+    if (!isSendable(channel)) throw new Error(`Channel ${channelId} is not a sendable text channel`);
     const chunks = splitMessage(content, this.config.maxMessageLength);
     for (const chunk of chunks) await channel.send(chunk);
+  }
+
+  /**
+   * Returns every guild the bot is in with its sendable text channels.
+   * Used by the list_discord_channels tool so Adam can look up channel IDs.
+   */
+  listChannels(): Array<{
+    guildId: string;
+    guildName: string;
+    channels: Array<{ id: string; name: string }>;
+  }> {
+    if (!this.client || !this.connected) return [];
+    return this.client.guilds.cache.map((guild) => ({
+      guildId: guild.id,
+      guildName: guild.name,
+      channels: guild.channels.cache
+        .filter((ch) => isSendable(ch))
+        .map((ch) => ({ id: ch.id, name: (ch as TextChannel).name }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    }));
   }
 
   async send(message: OutboundMessage): Promise<void> {
