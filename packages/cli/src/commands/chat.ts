@@ -13,7 +13,7 @@ import {
   type InboundMessage,
 } from "@adam/shared";
 import { vault, AuditLog } from "@adam/security";
-import { getRawDatabase, getDatabase, EpisodicStore } from "@adam/memory";
+import { getRawDatabase, getDatabase, EpisodicStore, ProfileStore } from "@adam/memory";
 import {
   ProviderRegistry,
   ModelRouter,
@@ -68,6 +68,7 @@ export function registerChatCommand(program: Command): void {
       }).start();
 
       let agent: Agent;
+      let profile!: ProfileStore;
 
       try {
         const dataDir = join(homedir(), ADAM_HOME_DIR, "data");
@@ -76,6 +77,7 @@ export function registerChatCommand(program: Command): void {
 
         const auditLog = new AuditLog(rawDb);
         const episodic = new EpisodicStore(drizzleDb);
+        profile = new ProfileStore(drizzleDb);
 
         const poolConfig = await buildModelPool(config);
 
@@ -125,12 +127,17 @@ export function registerChatCommand(program: Command): void {
         agent = new Agent(router, queue, episodic, tools, {
           systemPrompt: buildSystemPrompt(config),
           name: config.daemon.agentName,
-        });
+        }, profile);
 
+        const factCount = profile.getAll().length;
+        const memoryNote = factCount > 0
+          ? chalk.gray(`  ·  `) + chalk.cyan(`${factCount} memories`)
+          : "";
         initSpinner.succeed(
           chalk.green("Ready") +
             chalk.gray("  ·  ") +
-            chalk.gray(describePool(poolConfig)),
+            chalk.gray(describePool(poolConfig)) +
+            memoryNote,
         );
       } catch (e: unknown) {
         initSpinner.fail(
@@ -144,7 +151,7 @@ export function registerChatCommand(program: Command): void {
       console.log("");
 
       // ── Chat REPL ─────────────────────────────────────────────────────────────
-      await runRepl(chalk, ora, agent, config);
+      await runRepl(chalk, ora, agent, config, profile);
     });
 }
 
@@ -155,6 +162,7 @@ async function runRepl(
   ora: typeof import("ora").default,
   agent: Agent,
   config: AdamConfig,
+  profile: ProfileStore,
 ): Promise<void> {
   const sessionId = generateSessionId();
   const agentName = config.daemon.agentName;
@@ -170,9 +178,12 @@ async function runRepl(
   const HELP = [
     "",
     chalk.bold("  Commands:"),
-    `  ${chalk.white("/help")}    — show this message`,
-    `  ${chalk.white("/clear")}   — clear the screen`,
-    `  ${chalk.white("/exit")}    — end the session`,
+    `  ${chalk.white("/help")}          — show this message`,
+    `  ${chalk.white("/memory")}        — show what Adam knows about you`,
+    `  ${chalk.white("/forget <key>")}  — delete a specific memory by key`,
+    `  ${chalk.white("/forget all")}    — clear all profile memory`,
+    `  ${chalk.white("/clear")}         — clear the screen`,
+    `  ${chalk.white("/exit")}          — end the session`,
     "",
   ].join("\n");
 
@@ -203,6 +214,52 @@ async function runRepl(
     }
     if (input === "/clear") {
       process.stdout.write("\x1Bc");
+      ask();
+      return;
+    }
+    if (input === "/memory") {
+      const facts = profile.getAll();
+      if (facts.length === 0) {
+        console.log(chalk.gray("\n  No memories stored yet.\n"));
+      } else {
+        const byCategory: Record<string, typeof facts> = {};
+        for (const f of facts) {
+          (byCategory[f.category] ??= []).push(f);
+        }
+        console.log("");
+        console.log(chalk.bold(`  Memory  `) + chalk.gray(`(${facts.length} facts)`));
+        for (const [cat, entries] of Object.entries(byCategory)) {
+          console.log(chalk.gray(`\n  ${cat}`));
+          for (const f of entries) {
+            const conf = f.confidence < 1 ? chalk.gray(` (${Math.round(f.confidence * 100)}%)`) : "";
+            console.log(`    ${chalk.white(f.key)}: ${f.value}${conf}`);
+          }
+        }
+        console.log("");
+      }
+      ask();
+      return;
+    }
+    if (input.startsWith("/forget")) {
+      const arg = input.slice("/forget".length).trim();
+      if (!arg) {
+        console.log(chalk.gray('\n  Usage: /forget <key>  or  /forget all\n'));
+        ask();
+        return;
+      }
+      if (arg === "all") {
+        const facts = profile.getAll();
+        for (const f of facts) profile.delete(f.key);
+        console.log(chalk.green(`\n  Cleared ${facts.length} memories.\n`));
+      } else {
+        const existed = profile.get(arg) !== null;
+        profile.delete(arg);
+        console.log(
+          existed
+            ? chalk.green(`\n  Forgotten: ${arg}\n`)
+            : chalk.gray(`\n  No memory found for key: ${arg}\n`),
+        );
+      }
       ask();
       return;
     }

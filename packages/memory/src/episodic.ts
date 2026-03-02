@@ -83,6 +83,30 @@ export class EpisodicStore {
     return rows.map((r) => this.decryptRow(r));
   }
 
+  /**
+   * Returns the most recent N turns across ALL sessions, optionally bounded to
+   * the last `withinDays` days.  Used to seed cross-session context at startup.
+   */
+  getRecentAcrossSessions(limit = 20, withinDays = 30): EpisodicEntry[] {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - withinDays);
+
+    const rows = this.db
+      .select()
+      .from(episodicMemory)
+      .where(
+        and(
+          isNull(episodicMemory.deletedAt),
+          gte(episodicMemory.createdAt, cutoff.toISOString()),
+        ),
+      )
+      .orderBy(desc(episodicMemory.createdAt))
+      .limit(limit)
+      .all();
+
+    return rows.map((r) => this.decryptRow(r));
+  }
+
   softDelete(id: string): Result<void, AdamError> {
     return trySync(() => {
       this.db

@@ -10,7 +10,7 @@ import {
   createLogger,
 } from "@adam/shared";
 import type { ModelRouter } from "@adam/models";
-import type { EpisodicStore } from "@adam/memory";
+import type { EpisodicStore, ProfileStore } from "@adam/memory";
 import { IntentClassifier } from "./classifier.js";
 import { Planner } from "./planner.js";
 import { Executor, type ToolRegistry } from "./executor.js";
@@ -40,6 +40,7 @@ export class Agent {
     private episodic: EpisodicStore,
     private tools: ToolRegistry,
     private config: AgentConfig,
+    private profile: ProfileStore | null = null,
   ) {
     this.classifier = new IntentClassifier(router);
     this.planner = new Planner(router);
@@ -85,6 +86,9 @@ export class Agent {
       importance: 0.5,
     });
 
+    // Fire-and-forget: extract user facts in the background without blocking
+    void this.extractAndStoreProfileFacts(message.content, responseText, message.sessionId);
+
     const outbound: OutboundMessage = {
       sessionId: message.sessionId,
       channelId: message.channelId,
@@ -102,25 +106,48 @@ export class Agent {
     message: InboundMessage,
     tier: "fast" | "capable",
   ): Promise<Result<string, AdamError>> {
-    const recentHistory = this.episodic.getBySession(message.sessionId, 20);
-    const historyText = recentHistory
-      .reverse()
-      .map((e) => `${e.role}: ${e.content}`)
-      .join("\n");
+    // Current session — full recent history
+    const currentHistory = this.episodic
+      .getBySession(message.sessionId, 20)
+      .reverse();
+
+    // Cross-session — recent turns from past sessions (user/assistant only, no tool noise)
+    const pastHistory = this.episodic
+      .getRecentAcrossSessions(20, 14)
+      .filter(
+        (e) =>
+          e.sessionId !== message.sessionId &&
+          (e.role === "user" || e.role === "assistant"),
+      )
+      .slice(0, 10)
+      .reverse();
+
+    let contextBlock = "";
+
+    if (pastHistory.length > 0) {
+      const pastLines = pastHistory.map((e) => `${e.role}: ${e.content}`).join("\n");
+      contextBlock += `Previous sessions:\n${pastLines}\n\n`;
+    }
+
+    if (currentHistory.length > 0) {
+      const currentLines = currentHistory.map((e) => `${e.role}: ${e.content}`).join("\n");
+      contextBlock += `This session:\n${currentLines}\n\n`;
+    }
+
+    const system = this.buildEnrichedSystemPrompt();
+    const prompt = contextBlock
+      ? `${contextBlock}User: ${message.content}`
+      : message.content;
 
     const toolsObject = Object.fromEntries(this.tools);
     const hasTools = Object.keys(toolsObject).length > 0;
 
-    // Always pass tools so the model can decide autonomously whether to use them.
-    // Falls back to plain generate if the tool registry is empty.
     if (hasTools) {
       return this.router.generateWithTools({
         sessionId: message.sessionId,
         tier,
-        system: this.config.systemPrompt,
-        prompt: historyText
-          ? `Conversation so far:\n${historyText}\n\nUser: ${message.content}`
-          : message.content,
+        system,
+        prompt,
         tools: toolsObject,
         maxSteps: 5,
       });
@@ -129,11 +156,78 @@ export class Agent {
     return this.router.generate({
       sessionId: message.sessionId,
       tier,
-      system: this.config.systemPrompt,
-      prompt: historyText
-        ? `Conversation so far:\n${historyText}\n\nUser: ${message.content}`
-        : message.content,
+      system,
+      prompt,
     });
+  }
+
+  /**
+   * Builds the system prompt, injecting profile facts if available.
+   * Called on every turn so new facts are reflected immediately.
+   */
+  private buildEnrichedSystemPrompt(): string {
+    if (!this.profile) return this.config.systemPrompt;
+
+    const facts = this.profile.getAll();
+    if (facts.length === 0) return this.config.systemPrompt;
+
+    const factLines = facts
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 40)
+      .map((f) => `- ${f.key}: ${f.value}`)
+      .join("\n");
+
+    return `${this.config.systemPrompt}\n\nWhat you know about this user:\n${factLines}`;
+  }
+
+  /**
+   * Runs after every exchange to silently extract user facts and store them
+   * in the profile.  Fire-and-forget — never blocks a response.
+   */
+  private async extractAndStoreProfileFacts(
+    userMessage: string,
+    _agentResponse: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (!this.profile) return;
+
+    try {
+      const result = await this.router.generate({
+        sessionId,
+        tier: "fast",
+        system: `You extract factual information about the user from their messages.
+Output ONLY a valid JSON array. Each element: {"key": string, "value": string, "category": "identity"|"preference"|"context"|"goal", "confidence": number (0–1)}.
+Only extract clear, specific facts from the user's message. Do not infer or fabricate. Do not extract facts about the assistant. Return [] if nothing factual is present.
+Examples of valid extractions: name, job title, city, preferred tools, programming language, OS, goals.`,
+        prompt: `User's message: "${userMessage}"\n\nExtract facts about the user.`,
+      });
+
+      if (result.isErr()) return;
+
+      const jsonMatch = result.value.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) return;
+
+      const raw = JSON.parse(jsonMatch[0]) as unknown;
+      if (!Array.isArray(raw)) return;
+
+      for (const item of raw) {
+        if (typeof item !== "object" || item === null) continue;
+        const r = item as Record<string, unknown>;
+        const k = r["key"];
+        const v = r["value"];
+        const c = r["confidence"];
+        const cat = r["category"];
+        if (typeof k !== "string" || typeof v !== "string") continue;
+        if (typeof c !== "number" || c < 0.75) continue;
+        this.profile.set(k, v, {
+          category: typeof cat === "string" ? cat : "general",
+          confidence: c,
+          source: "auto-extracted",
+        });
+      }
+    } catch {
+      // best-effort — never throw
+    }
   }
 
   private async planAndExecute(
