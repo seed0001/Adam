@@ -79,7 +79,8 @@ export class SkillStore {
   /** draft → approved: user has reviewed the spec and signed off. */
   approve(id: string): SkillSpec | null {
     const skill = this.get(id);
-    if (!skill || skill.status !== "draft") return null;
+    if (!skill) return null;
+    if (skill.status !== "draft") return null;
     skill.status = "approved";
     skill.approvedAt = new Date().toISOString();
     this.save(skill);

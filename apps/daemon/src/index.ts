@@ -489,32 +489,28 @@ function createApiServer(ctx: ApiContext) {
 
         if (text.startsWith("/workshop approve ")) {
           const id = text.slice("/workshop approve ".length).trim().replace(/"/g, "");
-          try {
-            const skill = ctx.skills.approve(id);
-            return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\n\nRun \`/workshop latent ${id}\` to mark it latent, or view it in the Skills tab.`, sessionId });
-          } catch (e: unknown) {
-            return json(res, 200, { response: `Could not approve \`${id}\`: ${e instanceof Error ? e.message : String(e)}`, sessionId });
-          }
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\`\n\nRun \`/workshop\` to list all skills and check the ID.`, sessionId });
+          if (existing.status !== "draft") return json(res, 200, { response: `Cannot approve \`${existing.name}\` — current status is **${existing.status}**, not draft.\n\nOnly draft skills can be approved.`, sessionId });
+          const skill = ctx.skills.approve(id)!;
+          return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\n\nRun \`/workshop latent ${id}\` to mark it latent, or view it in the Skills tab.`, sessionId });
         }
 
         if (text.startsWith("/workshop latent ")) {
           const id = text.slice("/workshop latent ".length).trim().replace(/"/g, "");
-          try {
-            const skill = ctx.skills.makeLatent(id);
-            return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: approved → latent`, sessionId });
-          } catch (e: unknown) {
-            return json(res, 200, { response: `Could not mark latent \`${id}\`: ${e instanceof Error ? e.message : String(e)}`, sessionId });
-          }
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          if (!["draft", "approved"].includes(existing.status)) return json(res, 200, { response: `Cannot mark \`${existing.name}\` as latent — current status is **${existing.status}**.`, sessionId });
+          const skill = ctx.skills.makeLatent(id)!;
+          return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: ${existing.status} → latent`, sessionId });
         }
 
         if (text.startsWith("/workshop deprecate ")) {
           const id = text.slice("/workshop deprecate ".length).trim().replace(/"/g, "");
-          try {
-            const skill = ctx.skills.deprecate(id);
-            return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
-          } catch (e: unknown) {
-            return json(res, 200, { response: `Could not deprecate \`${id}\`: ${e instanceof Error ? e.message : String(e)}`, sessionId });
-          }
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          const skill = ctx.skills.deprecate(id)!;
+          return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
         }
 
         if (text === "/help") {
