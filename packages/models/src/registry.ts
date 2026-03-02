@@ -6,7 +6,8 @@ import { createMistral } from "@ai-sdk/mistral";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createXai } from "@ai-sdk/xai";
-import { ollama } from "ollama-ai-provider";
+import { createOllama } from "ollama-ai-provider";
+import { ollamaFetch } from "./ollama-fetch.js";
 import type { EmbeddingModel } from "ai";
 // Use a broad type to stay compatible across AI SDK provider versions
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -144,8 +145,13 @@ export class ProviderRegistry {
     config: Extract<ProviderConfig, { type: "local" }>,
   ): LanguageModel {
     switch (config.provider) {
-      case "ollama":
+      case "ollama": {
+        const baseURL = config.baseUrl
+          ? `${config.baseUrl.replace(/\/$/, "")}/api`
+          : "http://127.0.0.1:11434/api";
+        const ollama = createOllama({ baseURL, fetch: ollamaFetch });
         return ollama(config.model);
+      }
       case "lmstudio":
       case "vllm":
       case "openai-compatible": {
