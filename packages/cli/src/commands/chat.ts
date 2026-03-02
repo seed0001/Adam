@@ -178,12 +178,13 @@ async function runRepl(
   const HELP = [
     "",
     chalk.bold("  Commands:"),
-    `  ${chalk.white("/help")}          — show this message`,
-    `  ${chalk.white("/memory")}        — show what Adam knows about you`,
-    `  ${chalk.white("/forget <key>")}  — delete a specific memory by key`,
-    `  ${chalk.white("/forget all")}    — clear all profile memory`,
-    `  ${chalk.white("/clear")}         — clear the screen`,
-    `  ${chalk.white("/exit")}          — end the session`,
+    `  ${chalk.white("/help")}                    — show this message`,
+    `  ${chalk.white("/memory")}                  — show what Adam knows about you`,
+    `  ${chalk.white("/remember <key> = <value>")} — manually store a fact`,
+    `  ${chalk.white("/forget <key>")}             — delete a specific memory`,
+    `  ${chalk.white("/forget all")}               — clear all profile memory`,
+    `  ${chalk.white("/clear")}                    — clear the screen`,
+    `  ${chalk.white("/exit")}                     — end the session`,
     "",
   ].join("\n");
 
@@ -237,6 +238,21 @@ async function runRepl(
         }
         console.log("");
       }
+      ask();
+      return;
+    }
+    if (input.startsWith("/remember")) {
+      const arg = input.slice("/remember".length).trim();
+      const sep = arg.indexOf("=");
+      if (sep === -1 || !arg.slice(0, sep).trim() || !arg.slice(sep + 1).trim()) {
+        console.log(chalk.gray('\n  Usage: /remember <key> = <value>\n  Example: /remember name = Alex\n'));
+        ask();
+        return;
+      }
+      const key = arg.slice(0, sep).trim().toLowerCase().replace(/\s+/g, "_");
+      const value = arg.slice(sep + 1).trim();
+      profile.set(key, value, { category: "identity", confidence: 1.0, source: "user" });
+      console.log(chalk.green(`\n  Remembered: `) + chalk.white(key) + chalk.gray(` = ${value}\n`));
       ask();
       return;
     }

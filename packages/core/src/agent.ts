@@ -195,10 +195,15 @@ export class Agent {
       const result = await this.router.generate({
         sessionId,
         tier: "fast",
-        system: `You extract factual information about the user from their messages.
-Output ONLY a valid JSON array. Each element: {"key": string, "value": string, "category": "identity"|"preference"|"context"|"goal", "confidence": number (0–1)}.
-Only extract clear, specific facts from the user's message. Do not infer or fabricate. Do not extract facts about the assistant. Return [] if nothing factual is present.
-Examples of valid extractions: name, job title, city, preferred tools, programming language, OS, goals.`,
+        system: `You extract facts about the user from their messages to build a persistent profile.
+Output ONLY a valid JSON array. Each element: {"key": string, "value": string, "category": "identity"|"preference"|"context"|"goal", "confidence": number (0.0–1.0)}.
+Rules:
+- Extract facts the user states about themselves (name, job, location, tools, OS, preferences, goals, habits)
+- Also extract facts strongly implied by context (e.g. "my React app" implies they use React)
+- Do NOT extract what the user is asking Adam to do — only facts about the user themselves
+- Keep keys short and consistent: "name", "job", "os", "editor", "language", "location", "goal_*"
+- Return [] if the message contains nothing about the user
+Examples: [{"key":"os","value":"Windows","category":"context","confidence":0.9}]`,
         prompt: `User's message: "${userMessage}"\n\nExtract facts about the user.`,
       });
 
@@ -218,7 +223,7 @@ Examples of valid extractions: name, job title, city, preferred tools, programmi
         const c = r["confidence"];
         const cat = r["category"];
         if (typeof k !== "string" || typeof v !== "string") continue;
-        if (typeof c !== "number" || c < 0.75) continue;
+        if (typeof c !== "number" || c < 0.6) continue;
         this.profile.set(k, v, {
           category: typeof cat === "string" ? cat : "general",
           confidence: c,
