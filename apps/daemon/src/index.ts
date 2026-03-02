@@ -452,6 +452,68 @@ function createApiServer(ctx: ApiContext) {
         return json(res, 200, { ok: true, config: updated.budget });
       }
 
+      // ── GET /api/vault/status ─────────────────────────────────────────────
+      if (path === "/api/vault/status" && req.method === "GET") {
+        const keys = [
+          "provider:anthropic:api-key",
+          "provider:openai:api-key",
+          "provider:google:api-key",
+          "provider:groq:api-key",
+          "provider:mistral:api-key",
+          "provider:deepseek:api-key",
+          "provider:openrouter:api-key",
+          "provider:huggingface:api-key",
+          "adapter:discord:bot-token",
+          "adapter:telegram:bot-token",
+        ];
+        const status: Record<string, boolean> = {};
+        for (const key of keys) {
+          const r = await vault.get(key);
+          status[key] = r.isOk() && !!r.value;
+        }
+        return json(res, 200, { status });
+      }
+
+      // ── POST /api/vault/set ────────────────────────────────────────────────
+      if (path === "/api/vault/set" && req.method === "POST") {
+        const body = (await readBody(req)) as { key?: string; value?: string };
+        if (!body.key || typeof body.value !== "string") {
+          return json(res, 400, { error: "key and value are required" });
+        }
+        const trimmed = body.value.trim();
+        if (!trimmed) return json(res, 400, { error: "value cannot be empty" });
+        const r = await vault.set(body.key, trimmed);
+        if (r.isErr()) return json(res, 500, { error: r.error.message });
+        return json(res, 200, { ok: true });
+      }
+
+      // ── DELETE /api/vault/key ──────────────────────────────────────────────
+      if (path === "/api/vault/key" && req.method === "DELETE") {
+        const body = (await readBody(req)) as { key?: string };
+        if (!body.key) return json(res, 400, { error: "key is required" });
+        const dr = await vault.delete(body.key);
+        if (dr.isErr()) return json(res, 500, { error: dr.error.message });
+        return json(res, 200, { ok: true });
+      }
+
+      // ── GET /api/config/providers ──────────────────────────────────────────
+      if (path === "/api/config/providers" && req.method === "GET") {
+        return json(res, 200, { providers: ctx.config.providers });
+      }
+
+      // ── PATCH /api/config/providers ────────────────────────────────────────
+      if (path === "/api/config/providers" && req.method === "PATCH") {
+        const patch = (await readBody(req)) as Partial<AdamConfig["providers"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          providers: { ...ctx.config.providers, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        return json(res, 200, { ok: true, providers: updated.providers });
+      }
+
       // ── GET /api/personality ───────────────────────────────────────────────
       if (path === "/api/personality" && req.method === "GET") {
         return json(res, 200, {
@@ -610,12 +672,23 @@ Personality:
 - You do not introduce yourself unprompted. You do not list your capabilities unprompted.
 - When asked what you can do, answer accurately based on what you actually are — not like a generic AI assistant.
 
-When you act:
-- You think before you do anything destructive.
-- You confirm before writing files, running shell commands, or sending anything.
-- You use tools when it's faster or more accurate than reasoning alone.
-- You never tell the user to do something you can do yourself. If you have a tool for it, use it. If you don't have the tool, say that plainly — don't narrate a manual workaround.
-- You never say "I can't do X" and then describe how the user can do X themselves. That is a failure mode. Either do it or tell them exactly why you can't.`;
+Tools you have right now — use them:
+- web_fetch: fetch any URL, search the web, hit any API (GitHub, Reddit, docs, anything)
+- read_file: read any file on this machine by absolute or relative path
+- write_file: write or create any file on this machine
+- list_directory: list files and folders at any path on this machine
+- shell: run any shell command on this machine
+- send_discord_message: post a message to a Discord channel by channel ID
+- list_discord_channels: list all Discord guilds and channels the bot is connected to
+
+Rules for tool use:
+- ALWAYS attempt a task with your tools before concluding you cannot do it
+- Never say "I can't access X" — try read_file or list_directory first
+- Never say "I can't search" — use web_fetch on a search API or website
+- Never tell the user to do something you can do with a tool. Do it yourself.
+- If a tool call fails, report the actual error — not a vague "I can't"
+- Confirm before destructive actions (overwriting files, running shell commands that modify state)
+- No confirmation needed for read-only actions (reading files, listing directories, fetching URLs)`;
 }
 
 void main();

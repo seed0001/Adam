@@ -77,6 +77,40 @@ export type FullConfig = {
   budget: BudgetConfig;
 };
 
+export type CloudProviderConfig = {
+  enabled: boolean;
+  defaultModels: { fast?: string; capable?: string };
+};
+
+export type LocalProviderConfig = {
+  enabled: boolean;
+  baseUrl: string;
+  models: { fast: string; capable: string };
+};
+
+export type HuggingFaceConfig = {
+  enabled: boolean;
+  inferenceApiModel?: string;
+  tgiBaseUrl?: string;
+  embeddingModel: string;
+};
+
+export type ProvidersConfig = {
+  anthropic: CloudProviderConfig;
+  openai: CloudProviderConfig;
+  google: CloudProviderConfig;
+  groq: CloudProviderConfig;
+  mistral: CloudProviderConfig;
+  deepseek: CloudProviderConfig;
+  openrouter: CloudProviderConfig;
+  ollama: LocalProviderConfig;
+  lmstudio: LocalProviderConfig;
+  vllm: LocalProviderConfig;
+  huggingface: HuggingFaceConfig;
+};
+
+export type VaultStatus = Record<string, boolean>;
+
 export const api = {
   chat: (message: string, sessionId: string) =>
     apiFetch<ChatResponse>("/api/chat", {
@@ -131,5 +165,29 @@ export const api = {
   resetPersonality: () =>
     apiFetch<{ ok: boolean; content: string }>("/api/personality/reset", {
       method: "POST",
+    }),
+
+  getVaultStatus: () =>
+    apiFetch<{ status: VaultStatus }>("/api/vault/status").then((r) => r.status),
+
+  setVaultKey: (key: string, value: string) =>
+    apiFetch<{ ok: boolean }>("/api/vault/set", {
+      method: "POST",
+      body: JSON.stringify({ key, value }),
+    }),
+
+  deleteVaultKey: (key: string) =>
+    apiFetch<{ ok: boolean }>("/api/vault/key", {
+      method: "DELETE",
+      body: JSON.stringify({ key }),
+    }),
+
+  getProviders: () =>
+    apiFetch<{ providers: ProvidersConfig }>("/api/config/providers").then((r) => r.providers),
+
+  patchProviders: (patch: Partial<ProvidersConfig>) =>
+    apiFetch<{ ok: boolean; providers: ProvidersConfig }>("/api/config/providers", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
     }),
 };
