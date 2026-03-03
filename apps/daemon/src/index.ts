@@ -868,6 +868,7 @@ function createApiServer(ctx: ApiContext) {
           "provider:mistral:api-key",
           "provider:deepseek:api-key",
           "provider:openrouter:api-key",
+          "provider:qwen:api-key",
           "provider:huggingface:api-key",
           "adapter:discord:bot-token",
           "adapter:telegram:bot-token",
@@ -1052,7 +1053,7 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
   const coder: ProviderConfig[] = [];
 
   const cloudProviders = [
-    "anthropic", "openai", "google", "groq", "xai", "mistral", "deepseek", "openrouter",
+    "anthropic", "openai", "google", "groq", "xai", "mistral", "deepseek", "openrouter", "qwen",
   ] as const;
 
   for (const name of cloudProviders) {

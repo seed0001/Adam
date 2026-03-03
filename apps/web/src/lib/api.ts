@@ -131,6 +131,7 @@ export type ProvidersConfig = {
   mistral: CloudProviderConfig;
   deepseek: CloudProviderConfig;
   openrouter: CloudProviderConfig;
+  qwen: CloudProviderConfig;
   ollama: LocalProviderConfig;
   lmstudio: LocalProviderConfig;
   vllm: LocalProviderConfig;

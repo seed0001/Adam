@@ -10,6 +10,7 @@ const VAULT_KEYS = {
   mistral: "provider:mistral:api-key",
   deepseek: "provider:deepseek:api-key",
   openrouter: "provider:openrouter:api-key",
+  qwen: "provider:qwen:api-key",
   huggingface: "provider:huggingface:api-key",
   telegram: "adapter:telegram:bot-token",
   discord: "adapter:discord:bot-token",
@@ -129,7 +130,7 @@ export function registerInitCommand(program: Command): void {
           chalk.gray("  OS keychain via keytar and are never written to the config file.\n"),
       );
 
-      type CloudProvider = "anthropic" | "openai" | "google" | "groq" | "xai" | "mistral" | "deepseek" | "openrouter";
+      type CloudProvider = "anthropic" | "openai" | "google" | "groq" | "xai" | "mistral" | "deepseek" | "openrouter" | "qwen";
 
       const cloudProviders: { value: CloudProvider; name: string }[] = [
         { value: "anthropic", name: "Anthropic (Claude)" },
@@ -140,6 +141,7 @@ export function registerInitCommand(program: Command): void {
         { value: "mistral", name: "Mistral AI" },
         { value: "deepseek", name: "DeepSeek" },
         { value: "openrouter", name: "OpenRouter (unified gateway)" },
+        { value: "qwen", name: "Qwen (Alibaba DashScope)" },
       ];
 
       console.warn(chalk.gray("  Use Space to select, Enter to confirm.\n"));
@@ -447,6 +449,7 @@ function getDefaultModels(provider: string): { fast: string; capable: string } {
     mistral:    { fast: "mistral-small-latest",                     capable: "mistral-large-latest" },
     deepseek:   { fast: "deepseek-chat",                            capable: "deepseek-reasoner" },
     openrouter: { fast: "meta-llama/llama-3.1-8b-instruct",        capable: "anthropic/claude-sonnet-4-5" },
+    qwen:       { fast: "qwen-turbo",                               capable: "qwen-max" },
   };
   return defaults[provider] ?? { fast: "default", capable: "default" };
 }

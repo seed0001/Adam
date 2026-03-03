@@ -65,6 +65,7 @@ export const ProvidersConfigSchema = z.object({
   deepseek: CloudProviderConfigSchema.default({}),
   openrouter: CloudProviderConfigSchema.default({}),
   xai: CloudProviderConfigSchema.default({}),
+  qwen: CloudProviderConfigSchema.default({}),
   ollama: OllamaConfigSchema.default({}),
   lmstudio: OpenAICompatibleConfigSchema.default({}),
   vllm: OpenAICompatibleConfigSchema.default({}),

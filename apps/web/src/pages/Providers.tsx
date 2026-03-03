@@ -138,7 +138,7 @@ function TokenField({ vaultKey, isSet, onSaved }: { vaultKey: string; isSet: boo
 // ── Cloud provider row ────────────────────────────────────────────────────────
 
 const CLOUD_PROVIDERS: {
-  id: keyof Pick<ProvidersConfig, "anthropic" | "openai" | "google" | "groq" | "xai" | "mistral" | "deepseek" | "openrouter">;
+  id: keyof Pick<ProvidersConfig, "anthropic" | "openai" | "google" | "groq" | "xai" | "mistral" | "deepseek" | "openrouter" | "qwen">;
   name: string;
   subtitle: string;
   fastDefault: string;
@@ -193,6 +193,12 @@ const CLOUD_PROVIDERS: {
     subtitle: "Unified gateway to 200+ models",
     fastDefault: "meta-llama/llama-3.1-8b-instruct:free", capableDefault: "anthropic/claude-sonnet-4-5",
     docsUrl: "https://openrouter.ai/keys", modelsUrl: "https://openrouter.ai/models",
+  },
+  {
+    id: "qwen", name: "Qwen (Alibaba)",
+    subtitle: "Qwen-Turbo, Qwen-Plus, Qwen-Max — by Alibaba Cloud",
+    fastDefault: "qwen-turbo", capableDefault: "qwen-max",
+    docsUrl: "https://dashscope.console.aliyun.com/apiKey", modelsUrl: "https://www.alibabacloud.com/help/en/model-studio/getting-started/models",
   },
 ];
 

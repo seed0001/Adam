@@ -58,6 +58,7 @@ The architecture is organized around a set of core ideas:
 | Discord outbound tools — Adam can post to Discord on request | ✅ |
 | Provider management via web UI | ✅ |
 | xAI (Grok-3, Grok-3-fast) integration | ✅ |
+| Qwen (Alibaba DashScope) integration | ✅ |
 | Voice synthesis (LuxTTS) | ✅ |
 | Automated voice sidecar setup | ✅ |
 | Semantic vector search (sqlite-vec) | 🔜 |
@@ -163,6 +164,7 @@ adam voice             — Voice chat session (requires LuxTTS sidecar)
 - [DeepSeek](https://platform.deepseek.com) — cost-efficient reasoning models
 - [Groq](https://console.groq.com) — fast inference for open-source models
 - [OpenRouter](https://openrouter.ai) — unified gateway to 200+ models
+- [Qwen](https://dashscope.console.aliyun.com/apiKey) — Qwen-Turbo, Qwen-Plus, Qwen-Max by Alibaba Cloud
 
 API keys are stored in your OS keychain — never written to disk or any config file.
 
