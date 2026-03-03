@@ -1,3 +1,5 @@
+<img width="656" height="598" alt="image" src="https://github.com/user-attachments/assets/9f989e4e-9d04-4521-ae90-1ce8ff10f868" />
+
 # Adam
 
 **A self-hosted autonomous AI agent that lives on your machine.**
