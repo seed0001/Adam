@@ -635,6 +635,7 @@ async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
     "mistral",
     "deepseek",
     "openrouter",
+    "qwen",
   ] as const;
 
   for (const name of cloudProviders) {

@@ -144,7 +144,7 @@ Tier resolution rules:
 - `"coder"` → `pool.coder[0]` if non-empty, else `pool.capable[0]` (automatic fallback)
 - `"embedding"` → falls through to `pool.capable[0]` for language tasks
 
-All models are instantiated via the Vercel AI SDK (`@ai-sdk/openai`, `@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/xai`, custom Ollama/OpenAI-compatible setup).
+All models are instantiated via the Vercel AI SDK (`@ai-sdk/openai`, `@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/xai`, custom Ollama/OpenAI-compatible setup). Qwen uses the DashScope OpenAI-compatible endpoint (`dashscope-intl.aliyuncs.com/compatible-mode/v1`) via `@ai-sdk/openai`.
 
 **`ModelRouter`**
 

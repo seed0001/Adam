@@ -8,6 +8,7 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createXai } from "@ai-sdk/xai";
 import { createOllama } from "ollama-ai-provider";
 import { ollamaFetch } from "./ollama-fetch.js";
+import { qwenFetch } from "./qwen-fetch.js";
 import type { EmbeddingModel } from "ai";
 // Use a broad type to stay compatible across AI SDK provider versions
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -42,7 +43,8 @@ export type CloudProvider =
   | "mistral"
   | "deepseek"
   | "openrouter"
-  | "xai";
+  | "xai"
+  | "qwen";
 
 export type LocalProvider = "ollama" | "lmstudio" | "vllm" | "openai-compatible";
 
@@ -138,6 +140,12 @@ export class ProviderRegistry {
         return createOpenRouter({ apiKey: config.apiKey })(config.model);
       case "xai":
         return createXai({ apiKey: config.apiKey })(config.model);
+      case "qwen":
+        return createOpenAI({
+          baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+          apiKey: config.apiKey,
+          fetch: qwenFetch,
+        })(config.model);
     }
   }
 
