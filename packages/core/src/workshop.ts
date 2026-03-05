@@ -13,15 +13,9 @@ const logger = createLogger("core:workshop");
 const WORKSHOP_TRIGGERS = [
   "let's design a skill",
   "design a new skill",
-  "create a skill",
-  "new skill",
   "skill workshop",
-  "build a skill",
-  "make a skill",
-  "i want a skill",
-  "add a skill",
-  "skill that",
-  "workshop",
+  "enter workshop mode",
+  "start skill workshop",
 ];
 
 export function isWorkshopTrigger(message: string): boolean {
@@ -125,7 +119,7 @@ Rules:
       artifacts: draft.artifacts,
       successCriteria: draft.successCriteria,
       constraints: draft.constraints,
-      template: "none",
+      template: inferDefaultTemplate(draft),
       notes: draft.notes,
       createdAt: now,
       updatedAt: now,
@@ -175,6 +169,30 @@ Rules:
     this.store.save(updated);
     return { skill: updated, summary: formatSkillSummary(updated) };
   }
+}
+
+function inferDefaultTemplate(draft: z.infer<typeof LLMSkillDraftSchema>): SkillSpec["template"] {
+  const lowerDesc = draft.description.toLowerCase();
+  const stepText = draft.steps.join(" ").toLowerCase();
+  const tools = new Set(draft.allowedTools);
+
+  if (tools.has("shell")) return "shell-pipeline";
+  if (tools.has("web_fetch")) return "web-fetch-chain";
+  if (tools.has("write_file") || tools.has("read_file") || draft.artifacts.length > 0) return "file-scaffold";
+
+  // Conversational skills can execute via constrained LLM template.
+  if (!tools.size && (
+    lowerDesc.includes("clarify") ||
+    lowerDesc.includes("intent") ||
+    lowerDesc.includes("respond") ||
+    stepText.includes("formulate a response") ||
+    stepText.includes("acknowledge") ||
+    stepText.includes("prompt")
+  )) {
+    return "llm-response";
+  }
+
+  return "none";
 }
 
 // ── Formatting ────────────────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
-import { chromium, type Browser, type Page } from "playwright";
-import { createLogger } from "@adam/shared";
+import { chromium, type BrowserContext, type Page } from "playwright";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { ADAM_HOME_DIR, createLogger } from "@adam/shared";
 
 const logger = createLogger("browser");
 
@@ -26,7 +28,7 @@ const EXTRACT_SCRIPT = /* js */ `(() => {
  * so the LLM context stays manageable.
  */
 export class BrowserSession {
-  private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
   private page: Page | null = null;
   private readonly headless: boolean;
   private readonly contentLimit: number;
@@ -39,36 +41,67 @@ export class BrowserSession {
   // ── Core helpers ────────────────────────────────────────────────────────────
 
   async getPage(): Promise<Page> {
-    if (!this.browser || !this.browser.isConnected()) {
-      // Use installed Google Chrome instead of Chromium — Google blocks automation
-      // and rejects Chromium as "not secure" for sign-in. Real Chrome passes.
+    if (!this.context) {
+      const userDataDir = join(homedir(), ADAM_HOME_DIR, "suno_browser_data");
+      const launchOpts = {
+        headless: this.headless,
+        args: ["--disable-blink-features=AutomationControlled"],
+      };
+
       try {
-        logger.info("Launching Google Chrome (channel=chrome)");
-        this.browser = await chromium.launch({
+        logger.info(`Launching persistent browser context (channel=chrome, dir=${userDataDir})`);
+        this.context = await chromium.launchPersistentContext(userDataDir, {
+          ...launchOpts,
           channel: "chrome",
-          headless: this.headless,
-          args: ["--disable-blink-features=AutomationControlled"],
+        });
+        this.context.on("close", () => {
+          this.context = null;
+          this.page = null;
         });
       } catch {
-        logger.warn("Chrome not found, falling back to Chromium — Google sign-in may be blocked");
-        this.browser = await chromium.launch({
-          headless: this.headless,
-          args: ["--no-sandbox", "--disable-dev-shm-usage"],
-        });
+        try {
+          logger.info("Chrome not found, trying Microsoft Edge (persistent)");
+          this.context = await chromium.launchPersistentContext(userDataDir, {
+            ...launchOpts,
+            channel: "msedge",
+          });
+          this.context.on("close", () => {
+            this.context = null;
+            this.page = null;
+          });
+        } catch {
+          logger.warn(
+            "Chrome/Edge not found — using Chromium (persistent). Sign-in may be blocked."
+          );
+          this.context = await chromium.launchPersistentContext(userDataDir, {
+            headless: this.headless,
+            args: [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-blink-features=AutomationControlled",
+            ],
+          });
+          this.context.on("close", () => {
+            this.context = null;
+            this.page = null;
+          });
+        }
       }
     }
+
     if (!this.page || this.page.isClosed()) {
-      this.page = await this.browser.newPage();
+      // launchPersistentContext usually opens a page automatically
+      this.page = this.context.pages()[0] || (await this.context.newPage());
       await this.page.setViewportSize({ width: 1280, height: 800 });
-      logger.info("New browser page created");
+      logger.info("Browser page ready (persistent)");
     }
     return this.page;
   }
 
   private async extractContent(page: Page): Promise<string> {
     try {
-      const raw = (await page.evaluate(EXTRACT_SCRIPT)) as string;
-      return raw.slice(0, this.contentLimit);
+      const raw = await page.evaluate(EXTRACT_SCRIPT);
+      return (typeof raw === 'string' ? raw : "").slice(0, this.contentLimit);
     } catch {
       const fallback = await page.innerText("body").catch(() => "");
       return fallback.slice(0, this.contentLimit);
@@ -93,7 +126,7 @@ export class BrowserSession {
       // Fall back to visible text match
       await page.getByText(selectorOrText, { exact: false }).first().click({ timeout: 5_000 });
     }
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    await page.waitForLoadState("domcontentloaded").catch(() => { });
     return this.pageResult(page);
   }
 
@@ -102,7 +135,7 @@ export class BrowserSession {
     logger.info(`Type "${text}" into ${selector}`);
     await page.fill(selector, text);
     if (submit) await page.keyboard.press("Enter");
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    await page.waitForLoadState("domcontentloaded").catch(() => { });
     return { typed: text, into: selector, url: page.url() };
   }
 
@@ -121,7 +154,10 @@ export class BrowserSession {
   async scroll(direction: "up" | "down", pixels = 600): Promise<{ scrolled: string; url: string }> {
     const page = await this.getPage();
     await page.evaluate(
-      ({ dir, px }: { dir: string; px: number }) => window.scrollBy(0, dir === "down" ? px : -px),
+      ({ dir, px }: { dir: string; px: number }) => {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any
+        (window as any).scrollBy(0, dir === "down" ? px : -px);
+      },
       { dir: direction, px: pixels },
     );
     return { scrolled: `${direction} ${pixels}px`, url: page.url() };
@@ -140,8 +176,8 @@ export class BrowserSession {
   }
 
   async newTab(url?: string): Promise<PageResult> {
-    if (!this.browser || !this.browser.isConnected()) await this.getPage();
-    this.page = await this.browser!.newPage();
+    if (!this.context) await this.getPage();
+    this.page = await this.context!.newPage();
     await this.page.setViewportSize({ width: 1280, height: 800 });
     if (url) {
       await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -150,16 +186,16 @@ export class BrowserSession {
   }
 
   async close(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close().catch(() => {});
-      this.browser = null;
+    if (this.context) {
+      await this.context.close().catch(() => { });
+      this.context = null;
       this.page = null;
-      logger.info("Browser session closed");
+      logger.info("Browser session (persistent) closed");
     }
   }
 
   isOpen(): boolean {
-    return this.browser?.isConnected() === true && this.page?.isClosed() === false;
+    return this.context !== null && this.page?.isClosed() === false;
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────────

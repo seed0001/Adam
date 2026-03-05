@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import {
   ADAM_HOME_DIR,
   ADAM_VERSION,
-  PORTS,
   loadConfig,
   saveConfig,
   addLogHandler,
@@ -74,6 +73,7 @@ type ApiContext = {
   scratchpad: ScratchpadStore;
   skills: SkillStore;
   consolidator: MemoryConsolidator;
+  tools: Map<string, CoreTool<any, any>>;
 };
 
 type AdapterBundle = { adapters: BaseAdapter[]; discordAdapter: DiscordAdapter | null };
@@ -153,7 +153,8 @@ async function main() {
           "List every Discord guild and text channel the bot is connected to. " +
           "Call this first to find channel IDs before posting a message.",
         parameters: z.object({}),
-        execute: async () => ({ guilds: discordAdapter.listChannels() }),
+        // eslint-disable-next-line @typescript-eslint/require-await
+        execute: async () => ({ guilds: discordAdapter?.listChannels() || [] }),
       }),
     );
 
@@ -396,7 +397,63 @@ async function main() {
     }),
   );
 
-  logger.info("Browser tools registered (browser_navigate, browser_click, browser_type, browser_content, browser_screenshot, browser_scroll, browser_back, browser_new_tab, browser_close)");
+  tools.set(
+    "publish_to_suno",
+    tool({
+      description: "Publish a song to Suno using Custom Mode (lyrics, style, title).",
+      parameters: z.object({
+        lyrics: z.string().describe("The full lyrics of the song"),
+        style: z.string().describe("The musical style (e.g. 'heavy metal', 'ambient synth')"),
+        title: z.string().describe("The title of the song"),
+      }),
+      execute: async ({ lyrics, style, title }) => {
+        logger.info("publish_to_suno invoked");
+        const page = await browserSession.getPage();
+
+        logger.info("Navigating to https://suno.com/create");
+        await page.goto("https://suno.com/create", { waitUntil: "domcontentloaded", timeout: 30000 });
+
+        // Click "Custom" mode if not already active
+        try {
+          logger.info("Enabling Custom Mode");
+          await page.click('button:has-text("Custom")', { timeout: 5000 });
+        } catch {
+          logger.warn("Could not find 'Custom' button, assuming it might be already active or UI changed");
+        }
+
+        logger.info("Filling lyrics, style, and title");
+        try {
+          await page.fill('textarea[placeholder="Enter your lyrics"]', lyrics, { timeout: 10000 });
+          await page.fill('textarea[placeholder="Enter style of music"]', style);
+          await page.fill('input[placeholder="Enter a title"]', title);
+        } catch (e) {
+          logger.error("Failed to fill Suno fields", { error: String(e) });
+          // Fallback to generic textareas if placeholders fail
+          const textareas = await page.$$('textarea');
+          if (textareas.length >= 2) {
+            const lArea = textareas[0];
+            const sArea = textareas[1];
+            if (lArea) await lArea.fill(lyrics);
+            if (sArea) await sArea.fill(style);
+          }
+        }
+
+        logger.info("Clicking Create");
+        try {
+          await page.click('button:has-text("Create")', { timeout: 5000 });
+        } catch {
+          await page.click('button[type="submit"]');
+        }
+
+        return {
+          success: true,
+          message: `Song '${title}' is being generated with your custom lyrics.`,
+        };
+      },
+    }),
+  );
+
+  logger.info("Browser tools registered (browser_navigate, browser_click, browser_type, browser_content, browser_screenshot, browser_scroll, browser_back, browser_new_tab, browser_close, create_suno_song)");
 
   const agent = new Agent(
     router,
@@ -411,22 +468,23 @@ async function main() {
   );
 
   for (const adapter of adapters) {
-    adapter.on("message", async (message) => {
-      const result = await agent.process(message);
-      if (result.isOk()) {
-        await adapter.send(result.value);
-      } else {
-        logger.error("Agent processing failed", { error: result.error.message });
-        await adapter.send({
-          sessionId: message.sessionId,
-          channelId: message.channelId,
-          source: message.source,
-          content: `Error: ${result.error.message}`,
-          voiceProfileId: null,
-          replyToId: message.id,
-          metadata: {},
-        });
-      }
+    adapter.on("message", (message) => {
+      void agent.process(message).then(async (result) => {
+        if (result.isOk()) {
+          await adapter.send(result.value);
+        } else {
+          logger.error("Agent processing failed", { error: result.error.message });
+          await adapter.send({
+            sessionId: message.sessionId,
+            channelId: message.channelId,
+            source: message.source,
+            content: `Error: ${result.error.message}`,
+            voiceProfileId: null,
+            replyToId: message.id,
+            metadata: {},
+          });
+        }
+      });
     });
   }
 
@@ -439,7 +497,7 @@ async function main() {
   });
   consolidator.start();
 
-  const ctx: ApiContext = { config, agent, router, profile, episodic, discordAdapter, personality, scratchpad, skills, consolidator };
+  const ctx: ApiContext = { config, agent, router, profile, episodic, discordAdapter, personality, scratchpad, skills, consolidator, tools };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
     logger.info(`API server on http://localhost:${config.daemon.port}`);
@@ -458,8 +516,8 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down`);
     consolidator.stop();
-    for (const adapter of adapters) await adapter.stop().catch(() => {});
-    await browserSession.close().catch(() => {});
+    for (const adapter of adapters) await adapter.stop().catch(() => { });
+    await browserSession.close().catch(() => { });
     server.close();
     process.exit(0);
   };
@@ -546,7 +604,7 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 }
 
 function createApiServer(ctx: ApiContext) {
-  return createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  return createServer((req: IncomingMessage, res: ServerResponse) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -560,488 +618,522 @@ function createApiServer(ctx: ApiContext) {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
 
-    try {
-      // ── GET /health ────────────────────────────────────────────────────────
-      if (path === "/health" && req.method === "GET") {
-        return json(res, 200, {
-          status: "ok",
-          version: ADAM_VERSION,
-          uptime: Math.floor(process.uptime()),
-          agentName: ctx.config.daemon.agentName,
-          profileFacts: ctx.profile.getAll().length,
-        });
-      }
-
-      // ── GET /api/status ────────────────────────────────────────────────────
-      if (path === "/api/status" && req.method === "GET") {
-        const facts = ctx.profile.getAll();
-
-        // Derive active provider lists from the actual loaded pool —
-        // these are vault-verified at startup/reload, not just config flags.
-        const pool = ctx.router.getPool();
-        const toLabel = (cfg: { type: string; provider?: string; model: string } | undefined) =>
-          cfg ? `${cfg.type === "cloud" ? (cfg as { provider: string }).provider : cfg.type}/${cfg.model}` : null;
-
-        const activeModels = {
-          fast: toLabel(pool.fast[0]),
-          capable: toLabel(pool.capable[0]),
-        };
-
-        const cloudOn = [...new Set(
-          pool.fast.concat(pool.capable)
-            .filter((c) => c.type === "cloud")
-            .map((c) => (c as { provider: string }).provider)
-        )];
-        const localOn = [...new Set(
-          pool.fast.concat(pool.capable)
-            .filter((c) => c.type === "local")
-            .map((c) => (c as { provider: string }).provider)
-        )];
-
-        return json(res, 200, {
-          version: ADAM_VERSION,
-          uptime: Math.floor(process.uptime()),
-          agentName: ctx.config.daemon.agentName,
-          port: ctx.config.daemon.port,
-          providers: { cloud: cloudOn, local: localOn },
-          activeModels,
-          budget: ctx.config.budget,
-          memory: {
-            profileFacts: facts.length,
-            categories: [...new Set(facts.map((f) => f.category))],
-          },
-        });
-      }
-
-      // ── POST /api/chat ─────────────────────────────────────────────────────
-      if (path === "/api/chat" && req.method === "POST") {
-        const body = (await readBody(req)) as { message?: string; sessionId?: string };
-        const text = body.message?.trim();
-        if (!text) return json(res, 400, { error: "message is required" });
-
-        const sessionId = body.sessionId ?? generateSessionId();
-
-        // ── Slash command interception ──────────────────────────────────────
-        // Handle /commands directly so they don't reach the agent as natural
-        // language and accidentally trigger skill design mode.
-
-        if (text.startsWith("/remember ")) {
-          const rest = text.slice("/remember ".length).trim();
-          const eqIdx = rest.indexOf("=");
-          if (eqIdx !== -1) {
-            const key = rest.slice(0, eqIdx).trim();
-            const val = rest.slice(eqIdx + 1).trim();
-            ctx.profile.insert(key, val, "manual");
-            ctx.profile.protect(key);
-            return json(res, 200, { response: `Stored and protected: **${key}** = ${val}`, sessionId });
-          }
-          return json(res, 200, { response: "Usage: /remember key = value", sessionId });
-        }
-
-        if (text.startsWith("/forget ")) {
-          const key = text.slice("/forget ".length).trim();
-          if (key === "all") {
-            for (const f of ctx.profile.getAll()) ctx.profile.delete(f.key);
-            return json(res, 200, { response: "All profile memory cleared.", sessionId });
-          }
-          ctx.profile.delete(key);
-          return json(res, 200, { response: `Deleted memory: **${key}**`, sessionId });
-        }
-
-        if (text === "/memory") {
-          const facts = ctx.profile.getAll();
-          if (!facts.length) return json(res, 200, { response: "No profile memory stored yet.", sessionId });
-          const lines = facts.map((f) => {
-            const pct = Math.round(f.confidence * 100);
-            const bar = "█".repeat(Math.round(f.confidence * 10)) + "░".repeat(10 - Math.round(f.confidence * 10));
-            const badge = f.protected ? "🔒" : f.source === "manual" ? "✋" : "🤖";
-            return `${badge} **${f.key}** = ${f.value}\n   ${bar} ${pct}%`;
+    void (async () => {
+      try {
+        // ── GET /health ────────────────────────────────────────────────────────
+        if (path === "/health" && req.method === "GET") {
+          return json(res, 200, {
+            status: "ok",
+            version: ADAM_VERSION,
+            uptime: Math.floor(process.uptime()),
+            agentName: ctx.config.daemon.agentName,
+            profileFacts: ctx.profile.getAll().length,
           });
-          return json(res, 200, { response: lines.join("\n\n"), sessionId });
         }
 
-        if (text === "/pad") {
-          const content = ctx.scratchpad.load();
-          return json(res, 200, { response: content || "Scratchpad is empty.", sessionId });
+        // ── GET /api/status ────────────────────────────────────────────────────
+        if (path === "/api/status" && req.method === "GET") {
+          const facts = ctx.profile.getAll();
+
+          // Derive active provider lists from the actual loaded pool —
+          // these are vault-verified at startup/reload, not just config flags.
+          const pool = ctx.router.getPool();
+          const toLabel = (cfg: { type: string; provider?: string; model: string } | undefined) =>
+            cfg ? `${cfg.type === "cloud" ? (cfg as { provider: string }).provider : cfg.type}/${cfg.model}` : null;
+
+          const activeModels = {
+            fast: toLabel(pool.fast[0]),
+            capable: toLabel(pool.capable[0]),
+          };
+
+          const cloudOn = [...new Set(
+            pool.fast.concat(pool.capable)
+              .filter((c) => c.type === "cloud")
+              .map((c) => (c as { provider: string }).provider)
+          )];
+          const localOn = [...new Set(
+            pool.fast.concat(pool.capable)
+              .filter((c) => c.type === "local")
+              .map((c) => (c as { provider: string }).provider)
+          )];
+
+          return json(res, 200, {
+            version: ADAM_VERSION,
+            uptime: Math.floor(process.uptime()),
+            agentName: ctx.config.daemon.agentName,
+            port: ctx.config.daemon.port,
+            providers: { cloud: cloudOn, local: localOn },
+            activeModels,
+            budget: ctx.config.budget,
+            memory: {
+              profileFacts: facts.length,
+              categories: [...new Set(facts.map((f) => f.category))],
+            },
+          });
         }
 
-        if (text === "/pad clear") {
+        // ── POST /api/chat ─────────────────────────────────────────────────────
+        if (path === "/api/chat" && req.method === "POST") {
+          const body = (await readBody(req)) as { message?: string; sessionId?: string };
+          const text = body.message?.trim();
+          if (!text) return json(res, 400, { error: "message is required" });
+
+          const sessionId = body.sessionId ?? generateSessionId();
+
+          // ── Slash command interception ──────────────────────────────────────
+          // Handle /commands directly so they don't reach the agent as natural
+          // language and accidentally trigger skill design mode.
+
+          if (text.startsWith("/remember ")) {
+            const rest = text.slice("/remember ".length).trim();
+            const eqIdx = rest.indexOf("=");
+            if (eqIdx !== -1) {
+              const key = rest.slice(0, eqIdx).trim();
+              const val = rest.slice(eqIdx + 1).trim();
+              ctx.profile.set(key, val, { source: "manual" });
+              ctx.profile.protect(key);
+              return json(res, 200, { response: `Stored and protected: **${key}** = ${val}`, sessionId });
+            }
+            return json(res, 200, { response: "Usage: /remember key = value", sessionId });
+          }
+
+          if (text.startsWith("/forget ")) {
+            const key = text.slice("/forget ".length).trim();
+            if (key === "all") {
+              for (const f of ctx.profile.getAll()) ctx.profile.delete(f.key);
+              return json(res, 200, { response: "All profile memory cleared.", sessionId });
+            }
+            ctx.profile.delete(key);
+            return json(res, 200, { response: `Deleted memory: **${key}**`, sessionId });
+          }
+
+          if (text === "/memory") {
+            const facts = ctx.profile.getAll();
+            if (!facts.length) return json(res, 200, { response: "No profile memory stored yet.", sessionId });
+            const lines = facts.map((f) => {
+              const pct = Math.round(f.confidence * 100);
+              const bar = "█".repeat(Math.round(f.confidence * 10)) + "░".repeat(10 - Math.round(f.confidence * 10));
+              const badge = f.protected ? "🔒" : f.source === "manual" ? "✋" : "🤖";
+              return `${badge} **${f.key}** = ${f.value}\n   ${bar} ${pct}%`;
+            });
+            return json(res, 200, { response: lines.join("\n\n"), sessionId });
+          }
+
+          if (text === "/pad") {
+            const content = ctx.scratchpad.load();
+            return json(res, 200, { response: content || "Scratchpad is empty.", sessionId });
+          }
+
+          if (text === "/pad clear") {
+            const { unlinkSync, existsSync } = await import("node:fs");
+            if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
+            return json(res, 200, { response: "Scratchpad cleared.", sessionId });
+          }
+
+          if (text === "/workshop" || text === "/skills") {
+            const skills = ctx.skills.list();
+            if (!skills.length) return json(res, 200, { response: "No skill specs found.", sessionId });
+            const lines = skills.map((s) => `**${s.status.toUpperCase()}** · ${s.name} · \`${s.id}\``);
+            return json(res, 200, { response: lines.join("\n"), sessionId });
+          }
+
+          if (text.startsWith("/workshop show ")) {
+            const id = text.slice("/workshop show ".length).trim().replace(/"/g, "");
+            const skill = ctx.skills.get(id);
+            if (!skill) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+            const steps = skill.steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n");
+            const triggers = skill.triggers.join(", ");
+            const tools = skill.allowedTools.join(", ");
+            const constraintsLine = (skill.constraints && skill.constraints.length > 0)
+              ? "\n**Constraints:** " + skill.constraints.join(", ")
+              : "";
+            const out = [
+              `📋 **${skill.name}** \`${skill.id}\``,
+              `*${skill.description}*`,
+              ``,
+              `**Status:** ${skill.status}`,
+              `**Triggers:** ${triggers}`,
+              `**Tools allowed:** ${tools}`,
+              ``,
+              `**Steps:**\n${steps}`,
+              constraintsLine,
+              `\n**Success when:** ${Array.isArray(skill.successCriteria) ? skill.successCriteria.join(", ") : String(skill.successCriteria)}`,
+            ].filter(Boolean).join("\n");
+            return json(res, 200, { response: out, sessionId });
+          }
+
+          if (text.startsWith("/workshop approve ")) {
+            const id = text.slice("/workshop approve ".length).trim().replace(/"/g, "");
+            const existing = ctx.skills.get(id);
+            if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\`\n\nRun \`/workshop\` to list all skills and check the ID.`, sessionId });
+            if (existing.status !== "draft") return json(res, 200, { response: `Cannot approve \`${existing.name}\` — current status is **${existing.status}**, not draft.\n\nOnly draft skills can be approved.`, sessionId });
+            const skill = ctx.skills.approve(id)!;
+            return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\n\nRun \`/workshop latent ${id}\` to mark it latent, or view it in the Skills tab.`, sessionId });
+          }
+
+          if (text.startsWith("/workshop latent ")) {
+            const id = text.slice("/workshop latent ".length).trim().replace(/"/g, "");
+            const existing = ctx.skills.get(id);
+            if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+            if (!["draft", "approved"].includes(existing.status)) return json(res, 200, { response: `Cannot mark \`${existing.name}\` as latent — current status is **${existing.status}**.`, sessionId });
+            const skill = ctx.skills.makeLatent(id)!;
+            return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: ${existing.status} → latent`, sessionId });
+          }
+
+          if (text.startsWith("/workshop deprecate ")) {
+            const id = text.slice("/workshop deprecate ".length).trim().replace(/"/g, "");
+            const existing = ctx.skills.get(id);
+            if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+            const skill = ctx.skills.deprecate(id)!;
+            return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
+          }
+
+          if (text === "/help") {
+            return json(res, 200, {
+              response: [
+                "**Slash commands available in chat:**",
+                "",
+                "`/memory` — show profile facts with confidence levels",
+                "`/remember key = value` — store a protected memory fact",
+                "`/forget key` — delete a memory fact",
+                "`/forget all` — clear all profile memory",
+                "`/pad` — view Adam's scratchpad",
+                "`/pad clear` — clear the scratchpad",
+                "`/workshop` — list all skill specs",
+                "`/workshop show <id>` — view a skill spec",
+                "`/workshop approve <id>` — approve a draft skill",
+                "`/workshop latent <id>` — mark a skill as latent",
+                "`/workshop deprecate <id>` — deprecate a skill",
+                "`/help` — show this list",
+              ].join("\n"), sessionId
+            });
+          }
+
+          // ── Normal agent message ────────────────────────────────────────────
+          const msg: InboundMessage = {
+            id: generateId(),
+            sessionId,
+            source: "internal",
+            channelId: "web",
+            userId: "local-user",
+            role: "user",
+            content: text,
+            attachments: [],
+            receivedAt: new Date(),
+            metadata: {},
+          };
+
+          const result = await ctx.agent.process(msg);
+          if (result.isErr()) return json(res, 500, { error: result.error.message });
+          return json(res, 200, { response: result.value.content, sessionId });
+        }
+
+        // ── GET /api/memory/profile ────────────────────────────────────────────
+        if (path === "/api/memory/profile" && req.method === "GET") {
+          return json(res, 200, { facts: ctx.profile.getAll() });
+        }
+
+        // ── DELETE /api/memory/profile/:key ───────────────────────────────────
+        if (path.startsWith("/api/memory/profile/") && req.method === "DELETE") {
+          const key = decodeURIComponent(path.slice("/api/memory/profile/".length));
+          ctx.profile.delete(key);
+          return json(res, 200, { ok: true });
+        }
+
+        // ── GET /api/memory/episodic ───────────────────────────────────────────
+        if (path === "/api/memory/episodic" && req.method === "GET") {
+          const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
+          const days = parseInt(url.searchParams.get("days") ?? "30", 10);
+          return json(res, 200, { entries: ctx.episodic.getRecentAcrossSessions(limit, days) });
+        }
+
+        // ── GET /api/config ────────────────────────────────────────────────────
+        if (path === "/api/config" && req.method === "GET") {
+          return json(res, 200, {
+            daemon: ctx.config.daemon,
+            discord: ctx.config.adapters.discord,
+            telegram: ctx.config.adapters.telegram,
+            budget: ctx.config.budget,
+          });
+        }
+
+        // ── PATCH /api/config/discord ──────────────────────────────────────────
+        if (path === "/api/config/discord" && req.method === "PATCH") {
+          const patch = (await readBody(req)) as Partial<DiscordAdapterConfig>;
+          const updated: AdamConfig = {
+            ...ctx.config,
+            adapters: {
+              ...ctx.config.adapters,
+              discord: { ...ctx.config.adapters.discord, ...patch },
+            },
+          };
+          const saveResult = saveConfig(updated);
+          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+          ctx.config = updated;
+          // Hot-reload the Discord adapter if it's running
+          if (ctx.discordAdapter) ctx.discordAdapter.updateConfig(updated.adapters.discord);
+          return json(res, 200, { ok: true, config: updated.adapters.discord });
+        }
+
+        // ── PATCH /api/config/daemon ───────────────────────────────────────────
+        if (path === "/api/config/daemon" && req.method === "PATCH") {
+          const patch = (await readBody(req)) as Partial<AdamConfig["daemon"]>;
+          const updated: AdamConfig = {
+            ...ctx.config,
+            daemon: { ...ctx.config.daemon, ...patch },
+          };
+          const saveResult = saveConfig(updated);
+          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+          ctx.config = updated;
+          return json(res, 200, { ok: true, config: updated.daemon });
+        }
+
+        // ── PATCH /api/config/budget ───────────────────────────────────────────
+        if (path === "/api/config/budget" && req.method === "PATCH") {
+          const patch = (await readBody(req)) as Partial<AdamConfig["budget"]>;
+          const updated: AdamConfig = {
+            ...ctx.config,
+            budget: { ...ctx.config.budget, ...patch },
+          };
+          const saveResult = saveConfig(updated);
+          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+          ctx.config = updated;
+          return json(res, 200, { ok: true, config: updated.budget });
+        }
+
+        // ── GET /api/config/memory ─────────────────────────────────────────────
+        if (path === "/api/config/memory" && req.method === "GET") {
+          return json(res, 200, { memory: ctx.config.memory });
+        }
+
+        // ── PATCH /api/config/memory ───────────────────────────────────────────
+        if (path === "/api/config/memory" && req.method === "PATCH") {
+          const patch = (await readBody(req)) as Partial<AdamConfig["memory"]>;
+          const updated: AdamConfig = {
+            ...ctx.config,
+            memory: { ...ctx.config.memory, ...patch },
+          };
+          const saveResult = saveConfig(updated);
+          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+          ctx.config = updated;
+          // Hot-reload consolidator parameters immediately
+          if (ctx.consolidator) ctx.consolidator.updateOptions(patch);
+          return json(res, 200, { ok: true, config: updated.memory });
+        }
+
+        // ── GET /api/vault/status ─────────────────────────────────────────────
+        if (path === "/api/vault/status" && req.method === "GET") {
+          const keys = [
+            "provider:anthropic:api-key",
+            "provider:openai:api-key",
+            "provider:google:api-key",
+            "provider:groq:api-key",
+            "provider:xai:api-key",
+            "provider:mistral:api-key",
+            "provider:deepseek:api-key",
+            "provider:openrouter:api-key",
+            "provider:qwen:api-key",
+            "provider:huggingface:api-key",
+            "adapter:discord:bot-token",
+            "adapter:telegram:bot-token",
+          ];
+          const status: Record<string, boolean> = {};
+          for (const key of keys) {
+            const r = await vault.get(key);
+            status[key] = r.isOk() && !!r.value;
+          }
+          return json(res, 200, { status });
+        }
+
+        // ── POST /api/vault/set ────────────────────────────────────────────────
+        if (path === "/api/vault/set" && req.method === "POST") {
+          const body = (await readBody(req)) as { key?: string; value?: string };
+          if (!body.key || typeof body.value !== "string") {
+            return json(res, 400, { error: "key and value are required" });
+          }
+          const trimmed = body.value.trim();
+          if (!trimmed) return json(res, 400, { error: "value cannot be empty" });
+          const r = await vault.set(body.key, trimmed);
+          if (r.isErr()) return json(res, 500, { error: r.error.message });
+          return json(res, 200, { ok: true });
+        }
+
+        // ── DELETE /api/vault/key ──────────────────────────────────────────────
+        if (path === "/api/vault/key" && req.method === "DELETE") {
+          const body = (await readBody(req)) as { key?: string };
+          if (!body.key) return json(res, 400, { error: "key is required" });
+          const dr = await vault.delete(body.key);
+          if (dr.isErr()) return json(res, 500, { error: dr.error.message });
+          return json(res, 200, { ok: true });
+        }
+
+        // ── GET /api/config/providers ──────────────────────────────────────────
+        if (path === "/api/config/providers" && req.method === "GET") {
+          return json(res, 200, { providers: ctx.config.providers });
+        }
+
+        // ── PATCH /api/config/providers ────────────────────────────────────────
+        if (path === "/api/config/providers" && req.method === "PATCH") {
+          const patch = (await readBody(req)) as Partial<AdamConfig["providers"]>;
+          const updated: AdamConfig = {
+            ...ctx.config,
+            providers: { ...ctx.config.providers, ...patch },
+          };
+          const saveResult = saveConfig(updated);
+          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+          ctx.config = updated;
+
+          // Rebuild the model pool from the new config so the change takes effect
+          // immediately — no restart required.
+          const newPool = await buildModelPool(updated);
+          ctx.router.replaceRegistry(new ProviderRegistry(newPool));
+          logger.info("Model pool hot-reloaded after provider config change");
+
+          return json(res, 200, { ok: true, providers: updated.providers });
+        }
+
+        // ── GET /api/personality ───────────────────────────────────────────────
+        if (path === "/api/personality" && req.method === "GET") {
+          return json(res, 200, {
+            content: ctx.personality.loadOrSeed(),
+            path: ctx.personality.path,
+          });
+        }
+
+        // ── PATCH /api/personality ─────────────────────────────────────────────
+        if (path === "/api/personality" && req.method === "PATCH") {
+          const body = (await readBody(req)) as { content?: string };
+          if (typeof body.content !== "string" || !body.content.trim()) {
+            return json(res, 400, { error: "content is required" });
+          }
+          ctx.personality.save(body.content);
+          return json(res, 200, { ok: true, content: ctx.personality.load() });
+        }
+
+        // ── POST /api/personality/reset ────────────────────────────────────────
+        if (path === "/api/personality/reset" && req.method === "POST") {
+          ctx.personality.reset();
+          return json(res, 200, { ok: true, content: ctx.personality.load() });
+        }
+
+        // ── GET /api/scratchpad ────────────────────────────────────────────────
+        if (path === "/api/scratchpad" && req.method === "GET") {
+          return json(res, 200, {
+            content: ctx.scratchpad.load(),
+            lastModified: ctx.scratchpad.lastModified()?.toISOString() ?? null,
+            path: ctx.scratchpad.path,
+          });
+        }
+
+        // ── PATCH /api/scratchpad ──────────────────────────────────────────────
+        if (path === "/api/scratchpad" && req.method === "PATCH") {
+          const body = (await readBody(req)) as { content?: string };
+          if (typeof body.content !== "string") {
+            return json(res, 400, { error: "content is required" });
+          }
+          ctx.scratchpad.save(body.content);
+          return json(res, 200, { ok: true, lastModified: ctx.scratchpad.lastModified()?.toISOString() });
+        }
+
+        // ── DELETE /api/scratchpad ─────────────────────────────────────────────
+        if (path === "/api/scratchpad" && req.method === "DELETE") {
           const { unlinkSync, existsSync } = await import("node:fs");
           if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
-          return json(res, 200, { response: "Scratchpad cleared.", sessionId });
+          return json(res, 200, { ok: true });
         }
 
-        if (text === "/workshop" || text === "/skills") {
-          const skills = ctx.skills.list();
-          if (!skills.length) return json(res, 200, { response: "No skill specs found.", sessionId });
-          const lines = skills.map((s) => `**${s.status.toUpperCase()}** · ${s.name} · \`${s.id}\``);
-          return json(res, 200, { response: lines.join("\n"), sessionId });
+        // ── GET /api/skills ────────────────────────────────────────────────────
+        if (path === "/api/skills" && req.method === "GET") {
+          return json(res, 200, { skills: ctx.skills.list() });
         }
 
-        if (text.startsWith("/workshop show ")) {
-          const id = text.slice("/workshop show ".length).trim().replace(/"/g, "");
+        // ── GET /api/skills/:id ────────────────────────────────────────────────
+        if (path.startsWith("/api/skills/") && req.method === "GET" && !path.includes("/action/")) {
+          const id = path.slice("/api/skills/".length);
           const skill = ctx.skills.get(id);
-          if (!skill) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
-          const steps = skill.steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n");
-          const triggers = skill.triggers.join(", ");
-          const tools = skill.allowedTools.join(", ");
-          const out = [
-            `📋 **${skill.name}** \`${skill.id}\``,
-            `*${skill.description}*`,
-            ``,
-            `**Status:** ${skill.status}`,
-            `**Triggers:** ${triggers}`,
-            `**Tools allowed:** ${tools}`,
-            ``,
-            `**Steps:**\n${steps}`,
-            skill.constraints?.length ? `\n**Constraints:** ${skill.constraints.join(", ")}` : "",
-            `\n**Success when:** ${skill.successCriteria}`,
-          ].filter(Boolean).join("\n");
-          return json(res, 200, { response: out, sessionId });
+          if (!skill) return json(res, 404, { error: "Skill not found" });
+          return json(res, 200, { skill });
         }
 
-        if (text.startsWith("/workshop approve ")) {
-          const id = text.slice("/workshop approve ".length).trim().replace(/"/g, "");
-          const existing = ctx.skills.get(id);
-          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\`\n\nRun \`/workshop\` to list all skills and check the ID.`, sessionId });
-          if (existing.status !== "draft") return json(res, 200, { response: `Cannot approve \`${existing.name}\` — current status is **${existing.status}**, not draft.\n\nOnly draft skills can be approved.`, sessionId });
-          const skill = ctx.skills.approve(id)!;
-          return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\n\nRun \`/workshop latent ${id}\` to mark it latent, or view it in the Skills tab.`, sessionId });
+        // ── PATCH /api/skills/:id ──────────────────────────────────────────────
+        if (path.startsWith("/api/skills/") && req.method === "PATCH" && !path.includes("/action/")) {
+          const id = path.slice("/api/skills/".length);
+          const skill = ctx.skills.get(id);
+          if (!skill) return json(res, 404, { error: "Skill not found" });
+          const patch = (await readBody(req)) as Partial<typeof skill>;
+          // Only allow editing notes and steps on drafts — status changes go through actions
+          if (skill.status === "draft") {
+            if (patch.notes !== undefined) skill.notes = patch.notes;
+            if (patch.steps !== undefined) skill.steps = patch.steps;
+            if (patch.constraints !== undefined) skill.constraints = patch.constraints;
+            if (patch.successCriteria !== undefined) skill.successCriteria = patch.successCriteria;
+          }
+          ctx.skills.save(skill);
+          return json(res, 200, { ok: true, skill });
         }
 
-        if (text.startsWith("/workshop latent ")) {
-          const id = text.slice("/workshop latent ".length).trim().replace(/"/g, "");
-          const existing = ctx.skills.get(id);
-          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
-          if (!["draft", "approved"].includes(existing.status)) return json(res, 200, { response: `Cannot mark \`${existing.name}\` as latent — current status is **${existing.status}**.`, sessionId });
-          const skill = ctx.skills.makeLatent(id)!;
-          return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: ${existing.status} → latent`, sessionId });
+        // ── DELETE /api/skills/:id ─────────────────────────────────────────────
+        if (path.startsWith("/api/skills/") && req.method === "DELETE" && !path.includes("/action/")) {
+          const id = path.slice("/api/skills/".length);
+          const deleted = ctx.skills.delete(id);
+          return json(res, deleted ? 200 : 404, { ok: deleted });
         }
 
-        if (text.startsWith("/workshop deprecate ")) {
-          const id = text.slice("/workshop deprecate ".length).trim().replace(/"/g, "");
-          const existing = ctx.skills.get(id);
-          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
-          const skill = ctx.skills.deprecate(id)!;
-          return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
+        // ── POST /api/skills/:id/action/:action ────────────────────────────────
+        // Lifecycle transitions — these are the only gates to status changes
+        if (path.startsWith("/api/skills/") && path.includes("/action/") && req.method === "POST") {
+          const parts = path.split("/");
+          const id = parts[3];
+          const action = parts[5];
+          let updated = null;
+
+          if (!id) return json(res, 400, { error: "Skill ID is required" });
+
+          if (action === "approve") updated = ctx.skills.approve(id);
+          else if (action === "latent") updated = ctx.skills.makeLatent(id);
+          else if (action === "deprecate") updated = ctx.skills.deprecate(id);
+          else if (action === "activate") {
+            const body = (await readBody(req)) as { template?: string };
+            const template = (body.template ?? "none") as Parameters<typeof ctx.skills.activate>[1];
+            updated = ctx.skills.activate(id, template);
+          }
+
+          if (!updated) return json(res, 400, { error: `Cannot apply action '${action}' to this skill in its current state` });
+          return json(res, 200, { ok: true, skill: updated });
         }
 
-        if (text === "/help") {
-          return json(res, 200, { response: [
-            "**Slash commands available in chat:**",
-            "",
-            "`/memory` — show profile facts with confidence levels",
-            "`/remember key = value` — store a protected memory fact",
-            "`/forget key` — delete a memory fact",
-            "`/forget all` — clear all profile memory",
-            "`/pad` — view Adam's scratchpad",
-            "`/pad clear` — clear the scratchpad",
-            "`/workshop` — list all skill specs",
-            "`/workshop show <id>` — view a skill spec",
-            "`/workshop approve <id>` — approve a draft skill",
-            "`/workshop latent <id>` — mark a skill as latent",
-            "`/workshop deprecate <id>` — deprecate a skill",
-            "`/help` — show this list",
-          ].join("\n"), sessionId });
+        // ── POST /api/tools/execute ────────────────────────────────────────────
+        // Generic endpoint for external actors (like our Python agent) to call daemon tools
+        if (path === "/api/tools/execute" && req.method === "POST") {
+          const body = (await readBody(req)) as { tool: string; parameters: any };
+          const toolName = body.tool;
+          const parameters = body.parameters;
+
+          if (!toolName) return json(res, 400, { error: "tool name is required" });
+
+          const tool = ctx.tools.get(toolName);
+          if (!tool) return json(res, 404, { error: `Tool '${toolName}' not found` });
+
+          try {
+            logger.info(`Executing tool via API: ${toolName}`, { parameters });
+            const result = await (tool as any).execute(parameters, {
+              toolCallId: `api-${Date.now()}`,
+              messages: [],
+            });
+            return json(res, 200, { ok: true, result });
+          } catch (e) {
+            logger.error(`API tool execution failed: ${toolName}`, { error: String(e) });
+            return json(res, 500, { error: String(e) });
+          }
         }
 
-        // ── Normal agent message ────────────────────────────────────────────
-        const msg: InboundMessage = {
-          id: generateId(),
-          sessionId,
-          source: "web",
-          channelId: "web",
-          userId: "local-user",
-          role: "user",
-          content: text,
-          attachments: [],
-          receivedAt: new Date(),
-          metadata: {},
-        };
-
-        const result = await ctx.agent.process(msg);
-        if (result.isErr()) return json(res, 500, { error: result.error.message });
-        return json(res, 200, { response: result.value.content, sessionId });
+        // ── Static web UI ──────────────────────────────────────────────────────
+        serveStatic(res, path);
+      } catch (e: unknown) {
+        logger.error("API error", { path, error: String(e) });
+        json(res, 500, { error: "Internal server error" });
       }
-
-      // ── GET /api/memory/profile ────────────────────────────────────────────
-      if (path === "/api/memory/profile" && req.method === "GET") {
-        return json(res, 200, { facts: ctx.profile.getAll() });
-      }
-
-      // ── DELETE /api/memory/profile/:key ───────────────────────────────────
-      if (path.startsWith("/api/memory/profile/") && req.method === "DELETE") {
-        const key = decodeURIComponent(path.slice("/api/memory/profile/".length));
-        ctx.profile.delete(key);
-        return json(res, 200, { ok: true });
-      }
-
-      // ── GET /api/memory/episodic ───────────────────────────────────────────
-      if (path === "/api/memory/episodic" && req.method === "GET") {
-        const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
-        const days = parseInt(url.searchParams.get("days") ?? "30", 10);
-        return json(res, 200, { entries: ctx.episodic.getRecentAcrossSessions(limit, days) });
-      }
-
-      // ── GET /api/config ────────────────────────────────────────────────────
-      if (path === "/api/config" && req.method === "GET") {
-        return json(res, 200, {
-          daemon: ctx.config.daemon,
-          discord: ctx.config.adapters.discord,
-          telegram: ctx.config.adapters.telegram,
-          budget: ctx.config.budget,
-        });
-      }
-
-      // ── PATCH /api/config/discord ──────────────────────────────────────────
-      if (path === "/api/config/discord" && req.method === "PATCH") {
-        const patch = (await readBody(req)) as Partial<DiscordAdapterConfig>;
-        const updated: AdamConfig = {
-          ...ctx.config,
-          adapters: {
-            ...ctx.config.adapters,
-            discord: { ...ctx.config.adapters.discord, ...patch },
-          },
-        };
-        const saveResult = saveConfig(updated);
-        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-        ctx.config = updated;
-        // Hot-reload the Discord adapter if it's running
-        if (ctx.discordAdapter) ctx.discordAdapter.updateConfig(updated.adapters.discord);
-        return json(res, 200, { ok: true, config: updated.adapters.discord });
-      }
-
-      // ── PATCH /api/config/daemon ───────────────────────────────────────────
-      if (path === "/api/config/daemon" && req.method === "PATCH") {
-        const patch = (await readBody(req)) as Partial<AdamConfig["daemon"]>;
-        const updated: AdamConfig = {
-          ...ctx.config,
-          daemon: { ...ctx.config.daemon, ...patch },
-        };
-        const saveResult = saveConfig(updated);
-        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-        ctx.config = updated;
-        return json(res, 200, { ok: true, config: updated.daemon });
-      }
-
-      // ── PATCH /api/config/budget ───────────────────────────────────────────
-      if (path === "/api/config/budget" && req.method === "PATCH") {
-        const patch = (await readBody(req)) as Partial<AdamConfig["budget"]>;
-        const updated: AdamConfig = {
-          ...ctx.config,
-          budget: { ...ctx.config.budget, ...patch },
-        };
-        const saveResult = saveConfig(updated);
-        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-        ctx.config = updated;
-        return json(res, 200, { ok: true, config: updated.budget });
-      }
-
-      // ── GET /api/config/memory ─────────────────────────────────────────────
-      if (path === "/api/config/memory" && req.method === "GET") {
-        return json(res, 200, { memory: ctx.config.memory });
-      }
-
-      // ── PATCH /api/config/memory ───────────────────────────────────────────
-      if (path === "/api/config/memory" && req.method === "PATCH") {
-        const patch = (await readBody(req)) as Partial<AdamConfig["memory"]>;
-        const updated: AdamConfig = {
-          ...ctx.config,
-          memory: { ...ctx.config.memory, ...patch },
-        };
-        const saveResult = saveConfig(updated);
-        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-        ctx.config = updated;
-        // Hot-reload consolidator parameters immediately
-        if (ctx.consolidator) ctx.consolidator.updateOptions(patch);
-        return json(res, 200, { ok: true, config: updated.memory });
-      }
-
-      // ── GET /api/vault/status ─────────────────────────────────────────────
-      if (path === "/api/vault/status" && req.method === "GET") {
-        const keys = [
-          "provider:anthropic:api-key",
-          "provider:openai:api-key",
-          "provider:google:api-key",
-          "provider:groq:api-key",
-          "provider:xai:api-key",
-          "provider:mistral:api-key",
-          "provider:deepseek:api-key",
-          "provider:openrouter:api-key",
-          "provider:qwen:api-key",
-          "provider:huggingface:api-key",
-          "adapter:discord:bot-token",
-          "adapter:telegram:bot-token",
-        ];
-        const status: Record<string, boolean> = {};
-        for (const key of keys) {
-          const r = await vault.get(key);
-          status[key] = r.isOk() && !!r.value;
-        }
-        return json(res, 200, { status });
-      }
-
-      // ── POST /api/vault/set ────────────────────────────────────────────────
-      if (path === "/api/vault/set" && req.method === "POST") {
-        const body = (await readBody(req)) as { key?: string; value?: string };
-        if (!body.key || typeof body.value !== "string") {
-          return json(res, 400, { error: "key and value are required" });
-        }
-        const trimmed = body.value.trim();
-        if (!trimmed) return json(res, 400, { error: "value cannot be empty" });
-        const r = await vault.set(body.key, trimmed);
-        if (r.isErr()) return json(res, 500, { error: r.error.message });
-        return json(res, 200, { ok: true });
-      }
-
-      // ── DELETE /api/vault/key ──────────────────────────────────────────────
-      if (path === "/api/vault/key" && req.method === "DELETE") {
-        const body = (await readBody(req)) as { key?: string };
-        if (!body.key) return json(res, 400, { error: "key is required" });
-        const dr = await vault.delete(body.key);
-        if (dr.isErr()) return json(res, 500, { error: dr.error.message });
-        return json(res, 200, { ok: true });
-      }
-
-      // ── GET /api/config/providers ──────────────────────────────────────────
-      if (path === "/api/config/providers" && req.method === "GET") {
-        return json(res, 200, { providers: ctx.config.providers });
-      }
-
-      // ── PATCH /api/config/providers ────────────────────────────────────────
-      if (path === "/api/config/providers" && req.method === "PATCH") {
-        const patch = (await readBody(req)) as Partial<AdamConfig["providers"]>;
-        const updated: AdamConfig = {
-          ...ctx.config,
-          providers: { ...ctx.config.providers, ...patch },
-        };
-        const saveResult = saveConfig(updated);
-        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-        ctx.config = updated;
-
-        // Rebuild the model pool from the new config so the change takes effect
-        // immediately — no restart required.
-        const newPool = await buildModelPool(updated);
-        ctx.router.replaceRegistry(new ProviderRegistry(newPool));
-        logger.info("Model pool hot-reloaded after provider config change");
-
-        return json(res, 200, { ok: true, providers: updated.providers });
-      }
-
-      // ── GET /api/personality ───────────────────────────────────────────────
-      if (path === "/api/personality" && req.method === "GET") {
-        return json(res, 200, {
-          content: ctx.personality.loadOrSeed(),
-          path: ctx.personality.path,
-        });
-      }
-
-      // ── PATCH /api/personality ─────────────────────────────────────────────
-      if (path === "/api/personality" && req.method === "PATCH") {
-        const body = (await readBody(req)) as { content?: string };
-        if (typeof body.content !== "string" || !body.content.trim()) {
-          return json(res, 400, { error: "content is required" });
-        }
-        ctx.personality.save(body.content);
-        return json(res, 200, { ok: true, content: ctx.personality.load() });
-      }
-
-      // ── POST /api/personality/reset ────────────────────────────────────────
-      if (path === "/api/personality/reset" && req.method === "POST") {
-        ctx.personality.reset();
-        return json(res, 200, { ok: true, content: ctx.personality.load() });
-      }
-
-      // ── GET /api/scratchpad ────────────────────────────────────────────────
-      if (path === "/api/scratchpad" && req.method === "GET") {
-        return json(res, 200, {
-          content: ctx.scratchpad.load(),
-          lastModified: ctx.scratchpad.lastModified()?.toISOString() ?? null,
-          path: ctx.scratchpad.path,
-        });
-      }
-
-      // ── PATCH /api/scratchpad ──────────────────────────────────────────────
-      if (path === "/api/scratchpad" && req.method === "PATCH") {
-        const body = (await readBody(req)) as { content?: string };
-        if (typeof body.content !== "string") {
-          return json(res, 400, { error: "content is required" });
-        }
-        ctx.scratchpad.save(body.content);
-        return json(res, 200, { ok: true, lastModified: ctx.scratchpad.lastModified()?.toISOString() });
-      }
-
-      // ── DELETE /api/scratchpad ─────────────────────────────────────────────
-      if (path === "/api/scratchpad" && req.method === "DELETE") {
-        const { unlinkSync, existsSync } = await import("node:fs");
-        if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
-        return json(res, 200, { ok: true });
-      }
-
-      // ── GET /api/skills ────────────────────────────────────────────────────
-      if (path === "/api/skills" && req.method === "GET") {
-        return json(res, 200, { skills: ctx.skills.list() });
-      }
-
-      // ── GET /api/skills/:id ────────────────────────────────────────────────
-      if (path.startsWith("/api/skills/") && req.method === "GET" && !path.includes("/action/")) {
-        const id = path.slice("/api/skills/".length);
-        const skill = ctx.skills.get(id);
-        if (!skill) return json(res, 404, { error: "Skill not found" });
-        return json(res, 200, { skill });
-      }
-
-      // ── PATCH /api/skills/:id ──────────────────────────────────────────────
-      if (path.startsWith("/api/skills/") && req.method === "PATCH" && !path.includes("/action/")) {
-        const id = path.slice("/api/skills/".length);
-        const skill = ctx.skills.get(id);
-        if (!skill) return json(res, 404, { error: "Skill not found" });
-        const patch = (await readBody(req)) as Partial<typeof skill>;
-        // Only allow editing notes and steps on drafts — status changes go through actions
-        if (skill.status === "draft") {
-          if (patch.notes !== undefined) skill.notes = patch.notes;
-          if (patch.steps !== undefined) skill.steps = patch.steps;
-          if (patch.constraints !== undefined) skill.constraints = patch.constraints;
-          if (patch.successCriteria !== undefined) skill.successCriteria = patch.successCriteria;
-        }
-        ctx.skills.save(skill);
-        return json(res, 200, { ok: true, skill });
-      }
-
-      // ── DELETE /api/skills/:id ─────────────────────────────────────────────
-      if (path.startsWith("/api/skills/") && req.method === "DELETE" && !path.includes("/action/")) {
-        const id = path.slice("/api/skills/".length);
-        const deleted = ctx.skills.delete(id);
-        return json(res, deleted ? 200 : 404, { ok: deleted });
-      }
-
-      // ── POST /api/skills/:id/action/:action ────────────────────────────────
-      // Lifecycle transitions — these are the only gates to status changes
-      if (path.startsWith("/api/skills/") && path.includes("/action/") && req.method === "POST") {
-        const parts = path.split("/");
-        const id = parts[3];
-        const action = parts[5];
-        let updated = null;
-
-        if (action === "approve") updated = ctx.skills.approve(id);
-        else if (action === "latent") updated = ctx.skills.makeLatent(id);
-        else if (action === "deprecate") updated = ctx.skills.deprecate(id);
-        else if (action === "activate") {
-          const body = (await readBody(req)) as { template?: string };
-          const template = (body.template ?? "none") as Parameters<typeof ctx.skills.activate>[1];
-          updated = ctx.skills.activate(id, template);
-        }
-
-        if (!updated) return json(res, 400, { error: `Cannot apply action '${action}' to this skill in its current state` });
-        return json(res, 200, { ok: true, skill: updated });
-      }
-
-      // ── Static web UI ──────────────────────────────────────────────────────
-      serveStatic(res, path);
-    } catch (e: unknown) {
-      logger.error("API error", { path, error: String(e) });
-      json(res, 500, { error: "Internal server error" });
-    }
+    })();
   });
 }
 
@@ -1112,14 +1204,14 @@ async function buildAdapters(config: AdamConfig): Promise<AdapterBundle> {
 
   if (config.adapters.telegram.enabled) {
     const keyResult = await vault.get("adapter:telegram:bot-token");
-    const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
+    const token = keyResult.isOk() && keyResult.value ? keyResult.value : "";
     if (!token) logger.warn("Telegram: enabled but no token — skipping");
-    else { adapters.push(new TelegramAdapter({ token })); logger.info("Telegram adapter ready"); }
+    else { adapters.push(new TelegramAdapter(token)); logger.info("Telegram adapter ready"); }
   }
 
   if (config.adapters.discord.enabled) {
     const keyResult = await vault.get("adapter:discord:bot-token");
-    const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
+    const token = keyResult.isOk() && keyResult.value ? keyResult.value : "";
     if (!token) logger.warn("Discord: enabled but no token — skipping");
     else {
       discordAdapter = new DiscordAdapter(token, config.adapters.discord);

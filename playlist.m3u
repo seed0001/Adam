@@ -1,0 +1,7 @@
+#EXTM3U
+#EXTINF:0,Sample Track 1
+./music/track1.mp3
+#EXTINF:0,Sample Track 2
+./music/track2.mp3
+#EXTINF:0,Sample Track 3
+./music/track3.mp3

@@ -4,7 +4,6 @@ import { existsSync } from "node:fs";
 import {
   type SynthesisRequest,
   type SynthesisResult,
-  type VoiceProfile,
   type AdamError,
   type Result,
   ok,
@@ -12,9 +11,15 @@ import {
   adamError,
   PORTS,
   TIMEOUTS,
-  LUXTTS,
   createLogger,
 } from "@adam/shared";
+
+/** Lux sidecar expects reference audio + params. Used by LuxTTSProvider. */
+export interface LuxVoiceProfile {
+  id: string;
+  referenceAudioPath: string;
+  params: { rms?: number; tShift?: number; numSteps?: number; speed?: number; returnSmooth?: boolean; refDuration?: number };
+}
 
 const logger = createLogger("voice:sidecar");
 
@@ -91,7 +96,7 @@ export class VoiceClient {
 
   async synthesize(
     request: SynthesisRequest,
-    profile: VoiceProfile,
+    profile: LuxVoiceProfile,
   ): Promise<Result<SynthesisResult, AdamError>> {
     if (!this.ready) {
       return err(adamError("voice:not-ready", "LuxTTS sidecar is not running"));

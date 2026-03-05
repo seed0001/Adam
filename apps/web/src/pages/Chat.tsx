@@ -6,6 +6,8 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   ts: Date;
+  /** Base64 MP3 for assistant voice responses */
+  audioBase64?: string;
 };
 
 function getSessionId(): string {
@@ -57,7 +59,7 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
     return (
       <div className="flex justify-end">
         <div className="max-w-[75%]">
-          <div className="bg-[#0f2a2a] border border-[#1a3a3a] rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm text-zinc-200 leading-relaxed">
+          <div className="bg-[#0f2a2a]/90 backdrop-blur-md border border-[#1a3a3a]/80 rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm text-zinc-200 leading-relaxed shadow-lg">
             {msg.content}
           </div>
           <p className="text-right text-[10px] text-zinc-600 mt-1 pr-1">
@@ -75,9 +77,18 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-[11px] text-accent font-medium mb-1">{agentName}</p>
-        <div className="bg-[#111111] border border-[#1e1e1e] rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm text-zinc-200 leading-relaxed msg-content">
+        <div className="bg-[#111111]/90 backdrop-blur-md border border-[#1e1e1e]/80 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm text-zinc-200 leading-relaxed msg-content shadow-lg">
           {formatContent(msg.content)}
         </div>
+        {msg.audioBase64 && (
+          <div className="mt-2 pl-1">
+            <audio
+              controls
+              src={`data:audio/mpeg;base64,${msg.audioBase64}`}
+              className="w-full max-w-sm h-8"
+            />
+          </div>
+        )}
         <p className="text-[10px] text-zinc-600 mt-1 pl-1">
           {msg.ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
         </p>
@@ -94,7 +105,7 @@ function TypingIndicator({ agentName }: { agentName: string }) {
       </div>
       <div>
         <p className="text-[11px] text-accent font-medium mb-1">{agentName}</p>
-        <div className="bg-[#111111] border border-[#1e1e1e] rounded-2xl rounded-tl-sm px-4 py-3 flex gap-1.5 items-center">
+        <div className="bg-[#111111]/90 backdrop-blur-md border border-[#1e1e1e]/80 rounded-2xl rounded-tl-sm px-4 py-3 flex gap-1.5 items-center shadow-lg">
           <span className="typing-dot w-1.5 h-1.5 rounded-full bg-zinc-500 block" />
           <span className="typing-dot w-1.5 h-1.5 rounded-full bg-zinc-500 block" />
           <span className="typing-dot w-1.5 h-1.5 rounded-full bg-zinc-500 block" />
@@ -111,6 +122,7 @@ export default function Chat() {
   const [agentName, setAgentName] = useState("Adam");
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [backgroundBase64, setBackgroundBase64] = useState<string | null>(null);
   const sessionId = useRef(getSessionId());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -118,10 +130,15 @@ export default function Chat() {
   useEffect(() => {
     api.getStatus().then((s) => {
       setAgentName(s.agentName);
-      // Show the capable model — that's what answers most messages
       const model = s.activeModels?.capable ?? s.activeModels?.fast ?? null;
       setActiveModel(model);
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.getChatBackground(sessionId.current).then((r) => {
+      if (r?.backgroundBase64) setBackgroundBase64(r.backgroundBase64);
+    });
   }, []);
 
   useEffect(() => {
@@ -143,9 +160,16 @@ export default function Chat() {
     try {
       const res = await api.chat(text, sessionId.current);
       sessionId.current = res.sessionId;
+      if (res.backgroundBase64) setBackgroundBase64(res.backgroundBase64);
       setMessages((prev) => [
         ...prev,
-        { id: (Date.now() + 1).toString(), role: "assistant", content: res.response, ts: new Date() },
+        {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: res.response,
+          ts: new Date(),
+          audioBase64: res.audioBase64,
+        },
       ]);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Something went wrong");
@@ -168,10 +192,28 @@ export default function Chat() {
     e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
   };
 
+  const bgStyle = backgroundBase64
+    ? { backgroundImage: `url(data:image/png;base64,${backgroundBase64})` }
+    : undefined;
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
+      {/* Background layer */}
+      {backgroundBase64 && (
+        <div
+          className="absolute inset-0 bg-cover bg-center bg-no-repeat opacity-30"
+          style={bgStyle}
+          aria-hidden
+        />
+      )}
+      {backgroundBase64 && (
+        <div
+          className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/70"
+          aria-hidden
+        />
+      )}
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 relative z-10">
         {messages.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 select-none">
             <div className="w-10 h-10 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center">
@@ -182,6 +224,9 @@ export default function Chat() {
               <p className="text-zinc-700 text-xs font-mono">{activeModel}</p>
             )}
             <p className="text-zinc-700 text-xs mt-1">Shift+Enter for new line</p>
+            <p className="text-zinc-600 text-[10px] mt-0.5">
+              Ask Adam to change the background (e.g. &quot;set a cozy café background&quot;)
+            </p>
           </div>
         )}
 
@@ -204,7 +249,7 @@ export default function Chat() {
 
       {/* Input bar */}
       <div className="shrink-0 px-4 pb-4">
-        <div className="flex items-end gap-2 bg-[#111111] border border-[#242424] rounded-2xl px-4 py-3 focus-within:border-[#333333] transition-colors">
+        <div className="flex items-end gap-2 bg-[#111111]/90 backdrop-blur-md border border-[#242424]/80 rounded-2xl px-4 py-3 focus-within:border-[#333333] transition-colors shadow-lg relative z-10">
           <textarea
             ref={inputRef}
             value={input}

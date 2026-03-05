@@ -15,6 +15,7 @@
     "typecheck": "turbo typecheck",
     "test": "turbo test",
     "clean": "turbo clean",
+    "start": "node packages/cli/dist/bin.js start",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\" --ignore-path .prettierignore"
   },
   "devDependencies": {

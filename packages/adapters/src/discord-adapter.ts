@@ -284,6 +284,8 @@ export class DiscordAdapter extends BaseAdapter {
   }
 
   async send(message: OutboundMessage): Promise<void> {
+    const audioPath = message.metadata?.["audioPath"] as string | undefined;
+
     // If there's a pending slash command interaction, edit the deferred reply
     const interaction = this.pendingInteractions.get(message.channelId);
     if (interaction?.deferred) {
@@ -291,9 +293,30 @@ export class DiscordAdapter extends BaseAdapter {
       const chunks = splitMessage(message.content, this.config.maxMessageLength);
       await interaction.editReply(chunks[0] ?? "…");
       for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
+      if (audioPath) {
+        const { AttachmentBuilder } = await import("discord.js");
+        await interaction.followUp({
+          files: [new AttachmentBuilder(audioPath, { name: "adam.mp3" })],
+        });
+      }
       return;
     }
-    await this.sendToChannel(message.channelId, message.content);
+
+    if (audioPath) {
+      if (!this.client) throw new Error("Discord client not started");
+      const channel = await this.client.channels.fetch(message.channelId);
+      if (!isSendable(channel)) throw new Error(`Channel ${message.channelId} is not a sendable text channel`);
+      const { AttachmentBuilder } = await import("discord.js");
+      const chunks = splitMessage(message.content, this.config.maxMessageLength);
+      const first = chunks[0] ?? "…";
+      await channel.send({
+        content: first,
+        files: [new AttachmentBuilder(audioPath, { name: "adam.mp3" })],
+      });
+      for (const chunk of chunks.slice(1)) await channel.send(chunk);
+    } else {
+      await this.sendToChannel(message.channelId, message.content);
+    }
   }
 
   isConnected(): boolean {

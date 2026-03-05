@@ -23,6 +23,7 @@ describe("IntentClassifier", () => {
     const router = makeRouter(
       ok({
         complexity: "trivial",
+        intent: "general",
         reasoning: "It's just a hello.",
         suggestedTier: "fast",
         requiresPlanning: false,
@@ -42,6 +43,7 @@ describe("IntentClassifier", () => {
     const router = makeRouter(
       ok({
         complexity: "complex",
+        intent: "build",
         reasoning: "Needs tool use.",
         suggestedTier: "capable",
         requiresPlanning: true,
@@ -55,7 +57,7 @@ describe("IntentClassifier", () => {
 
   it("calls generateObject with tier:'fast'", async () => {
     const router = makeRouter(
-      ok({ complexity: "trivial", reasoning: ".", suggestedTier: "fast", requiresPlanning: false }),
+      ok({ complexity: "trivial", intent: "general", reasoning: ".", suggestedTier: "fast", requiresPlanning: false }),
     );
     const classifier = new IntentClassifier(router);
     await classifier.classify("test input", "session-abc");
@@ -67,7 +69,7 @@ describe("IntentClassifier", () => {
 
   it("passes the input string as the prompt", async () => {
     const router = makeRouter(
-      ok({ complexity: "simple", reasoning: ".", suggestedTier: "fast", requiresPlanning: false }),
+      ok({ complexity: "simple", intent: "general", reasoning: ".", suggestedTier: "fast", requiresPlanning: false }),
     );
     const classifier = new IntentClassifier(router);
     const input = "what is the weather today?";

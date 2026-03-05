@@ -88,6 +88,7 @@ export const SkillSpecSchema = z.object({
     "file-scaffold",     // creates a directory/file structure
     "shell-pipeline",    // runs a sequence of shell commands
     "web-fetch-chain",   // fetches URLs, processes results
+    "llm-response",      // executes as a constrained prompt-chain response
     "none",              // latent only — simulate but don't execute
   ]).default("none"),
 

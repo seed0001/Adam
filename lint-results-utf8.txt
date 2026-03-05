@@ -1,0 +1,168 @@
+﻿
+> adam@0.1.0 lint C:\Users\aztre\Desktop\New folder (45)\adam
+> turbo lint "--filter" "@adam/daemon"
+
+ΓÇó Packages in scope: @adam/daemon
+ΓÇó Running lint in 1 packages
+ΓÇó Remote caching disabled
+@adam/daemon:lint: cache miss, executing 62133c4ae18d9289
+@adam/daemon:lint: 
+@adam/daemon:lint: > @adam/daemon@0.1.0 lint C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon
+@adam/daemon:lint: > eslint src/
+@adam/daemon:lint: 
+@adam/daemon:lint: 
+@adam/daemon:lint: C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon\src\browser.ts
+@adam/daemon:lint:    74:19  error  This assertion is unnecessary since it does not change the type of the expression  @typescript-eslint/no-unnecessary-type-assertion
+@adam/daemon:lint:   128:53  error  Unsafe return of a value of type error                                             @typescript-eslint/no-unsafe-return
+@adam/daemon:lint:   128:53  error  Unsafe call of a type that could not be resolved                                   @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   128:60  error  Unsafe member access .scrollBy on a type that cannot be resolved                   @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint: 
+@adam/daemon:lint: C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon\src\index.ts
+@adam/daemon:lint:     10:3   error  'PORTS' is defined but never used. Allowed unused vars must match /^_/u                                                                                                                                                                                                                                                                     @typescript-eslint/no-unused-vars
+@adam/daemon:lint:     28:8   error  'ProviderConfig' is defined but never used. Allowed unused vars must match /^_/u                                                                                                                                                                                                                                                            @typescript-eslint/no-unused-vars
+@adam/daemon:lint:    118:5   error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    118:13  error  Unsafe member access .exec on a type that cannot be resolved                                                                                                                                                                                                                                                                                @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    128:11  error  Unsafe assignment of an error typed value                                                                                                                                                                                                                                                                                                   @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:    128:17  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    128:17  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    128:25  error  Unsafe member access .prepare on a type that cannot be resolved                                                                                                                                                                                                                                                                             @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    128:98  error  Unsafe member access .get on a type that cannot be resolved                                                                                                                                                                                                                                                                                 @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    133:17  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    133:17  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    133:25  error  Unsafe member access .prepare on a type that cannot be resolved                                                                                                                                                                                                                                                                             @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    133:82  error  Unsafe member access .get on a type that cannot be resolved                                                                                                                                                                                                                                                                                 @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    139:5   error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    139:5   error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    140:8   error  Unsafe member access .prepare on a type that cannot be resolved                                                                                                                                                                                                                                                                             @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    141:8   error  Unsafe member access .run on a type that cannot be resolved                                                                                                                                                                                                                                                                                 @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    145:18  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    145:18  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    146:8   error  Unsafe member access .prepare on a type that cannot be resolved                                                                                                                                                                                                                                                                             @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    147:8   error  Unsafe member access .all on a type that cannot be resolved                                                                                                                                                                                                                                                                                 @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    238:9   error  Async method 'execute' has no 'await' expression                                                                                                                                                                                                                                                                                            @typescript-eslint/require-await
+@adam/daemon:lint:    552:7   error  Async method 'execute' has no 'await' expression                                                                                                                                                                                                                                                                                            @typescript-eslint/require-await
+@adam/daemon:lint:    586:7   error  Async method 'execute' has no 'await' expression                                                                                                                                                                                                                                                                                            @typescript-eslint/require-await
+@adam/daemon:lint:    621:7   error  Async method 'execute' has no 'await' expression                                                                                                                                                                                                                                                                                            @typescript-eslint/require-await
+@adam/daemon:lint:    638:7   error  Async method 'execute' has no 'await' expression                                                                                                                                                                                                                                                                                            @typescript-eslint/require-await
+@adam/daemon:lint:    693:27  error  Promise returned in function argument where a void return was expected                                                                                                                                                                                                                                                                      @typescript-eslint/no-misused-promises
+@adam/daemon:lint:    971:23  error  Promise returned in function argument where a void return was expected                                                                                                                                                                                                                                                                      @typescript-eslint/no-misused-promises
+@adam/daemon:lint:   1783:13  error  Unsafe call of a type that could not be resolved                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   1849:36  error  Invalid type "string[]" of template literal expression                                                                                                                                                                                                                                                                                      @typescript-eslint/restrict-template-expressions
+@adam/daemon:lint:   2501:17  error  A method that is not declared with `this: void` may cause unintentional scoping of `this` when separated from its object.
+@adam/daemon:lint: Consider using an arrow function or explicitly `.bind()`ing the method to avoid calling the method with an unintended `this` value. 
+@adam/daemon:lint: If a function does not access `this`, it can be annotated with `this: void`  @typescript-eslint/unbound-method
+@adam/daemon:lint: 
+@adam/daemon:lint: C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon\src\suno-api.ts
+@adam/daemon:lint:    91:13   error  Unsafe assignment of an error typed value                                     @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:    91:31   error  Unsafe call of a type that could not be resolved                              @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    91:38   error  Unsafe member access .randomUUID on a type that cannot be resolved            @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    98:60   error  Unsafe call of an `any` typed value                                           @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:    98:72   error  Unsafe argument of type error typed assigned to a parameter of type `string`  @typescript-eslint/no-unsafe-argument
+@adam/daemon:lint:    98:85   error  Unsafe member access .running_clip_ids on an `any` value                      @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:    98:109  error  Unsafe member access .join on an `any` value                                  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   127:19   error  Unsafe assignment of an error typed value                                     @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   130:19   error  Unsafe assignment of an error typed value                                     @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   130:27   error  Unsafe call of a type that could not be resolved                              @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   130:33   error  Unsafe member access .find on a type that cannot be resolved                  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   130:42   error  Unexpected any. Specify a different type                                      @typescript-eslint/no-explicit-any
+@adam/daemon:lint:   130:50   error  Unsafe return of a value of type `any`                                        @typescript-eslint/no-unsafe-return
+@adam/daemon:lint:   130:52   error  Unsafe member access .status on an `any` value                                @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   130:79   error  Unsafe member access .audio_url on an `any` value                             @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   131:24   error  Unsafe return of a value of type error                                        @typescript-eslint/no-unsafe-return
+@adam/daemon:lint:   147:14   error  'err' is defined but never used                                               @typescript-eslint/no-unused-vars
+@adam/daemon:lint:   210:15   error  Unsafe assignment of an error typed value                                     @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   211:59   error  Unsafe member access .id on a type that cannot be resolved                    @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   214:34   error  Unsafe argument of type error typed assigned to a parameter of type `string`  @typescript-eslint/no-unsafe-argument
+@adam/daemon:lint:   214:39   error  Unsafe member access .id on a type that cannot be resolved                    @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   217:47   error  Unsafe argument of type error typed assigned to a parameter of type `string`  @typescript-eslint/no-unsafe-argument
+@adam/daemon:lint:   217:52   error  Unsafe member access .id on a type that cannot be resolved                    @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   217:56   error  Unsafe argument of type error typed assigned to a parameter of type `string`  @typescript-eslint/no-unsafe-argument
+@adam/daemon:lint:   217:61   error  Unsafe member access .audio_url on a type that cannot be resolved             @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint: 
+@adam/daemon:lint: C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon\src\suno.ts
+@adam/daemon:lint:   145:11  error  Unsafe assignment of an error typed value                               @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   147:11  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   147:16  error  Unsafe member access .goto on a type that cannot be resolved            @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   148:11  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   148:16  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   153:15  error  Unsafe assignment of an error typed value                               @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   153:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   153:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   153:26  error  Unsafe member access .locator on a type that cannot be resolved         @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   153:39  error  Unsafe member access .first on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   154:19  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   154:23  error  Unsafe member access .isVisible on a type that cannot be resolved       @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   155:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   155:21  error  Unsafe member access .click on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   157:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   157:22  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   168:15  error  Unsafe assignment of an error typed value                               @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   168:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   168:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   168:26  error  Unsafe member access .locator on a type that cannot be resolved         @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   168:39  error  Unsafe member access .first on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   169:19  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   169:23  error  Unsafe member access .isVisible on a type that cannot be resolved       @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   170:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   170:21  error  Unsafe member access .click on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   171:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   171:22  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   183:15  error  Unsafe assignment of an error typed value                               @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   183:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   183:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   183:26  error  Unsafe member access .locator on a type that cannot be resolved         @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   183:39  error  Unsafe member access .first on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   184:19  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   184:23  error  Unsafe member access .isVisible on a type that cannot be resolved       @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   185:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   185:21  error  Unsafe member access .click on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   186:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   186:22  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   187:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   187:21  error  Unsafe member access .fill on a type that cannot be resolved            @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   188:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   188:21  error  Unsafe member access .type on a type that cannot be resolved            @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   201:15  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   201:20  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   204:19  error  Unsafe assignment of an error typed value                               @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   204:25  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   204:25  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   204:30  error  Unsafe member access .locator on a type that cannot be resolved         @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   204:43  error  Unsafe member access .first on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   205:23  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   205:27  error  Unsafe member access .isVisible on a type that cannot be resolved       @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   206:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   206:25  error  Unsafe member access .click on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   207:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   207:26  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   208:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   208:25  error  Unsafe member access .fill on a type that cannot be resolved            @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   209:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   209:25  error  Unsafe member access .type on a type that cannot be resolved            @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   232:11  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   232:16  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   237:15  error  Unsafe assignment of an error typed value                               @typescript-eslint/no-unsafe-assignment
+@adam/daemon:lint:   237:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   237:21  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   237:26  error  Unsafe member access .locator on a type that cannot be resolved         @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   237:39  error  Unsafe member access .first on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   238:20  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   238:24  error  Unsafe member access .isVisible on a type that cannot be resolved       @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   238:64  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   238:68  error  Unsafe member access .isEnabled on a type that cannot be resolved       @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   239:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   239:21  error  Unsafe member access .click on a type that cannot be resolved           @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint:   241:17  error  Unsafe call of a type that could not be resolved                        @typescript-eslint/no-unsafe-call
+@adam/daemon:lint:   241:22  error  Unsafe member access .waitForTimeout on a type that cannot be resolved  @typescript-eslint/no-unsafe-member-access
+@adam/daemon:lint: 
+@adam/daemon:lint: Γ£û 134 problems (134 errors, 0 warnings)
+@adam/daemon:lint:   1 error and 0 warnings potentially fixable with the `--fix` option.
+@adam/daemon:lint: 
+@adam/daemon:lint: ΓÇëELIFECYCLEΓÇë Command failed with exit code 1.
+
+ Tasks:    0 successful, 1 total
+Cached:    0 cached, 1 total
+  Time:    3.466s 
+Failed:    @adam/daemon#lint
+
+ΓÇëELIFECYCLEΓÇë Command failed with exit code 1.

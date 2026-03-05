@@ -117,6 +117,13 @@ export const VoiceConfigSchema = z.object({
   enabled: z.boolean().default(false),
   autoStartSidecar: z.boolean().default(true),
   outputDir: z.string().optional(),
+  providers: z
+    .object({
+      edge: z.boolean().default(true),
+      lux: z.boolean().default(true),
+      xtts: z.boolean().default(false),
+    })
+    .optional(),
 });
 export type VoiceConfig = z.infer<typeof VoiceConfigSchema>;
 

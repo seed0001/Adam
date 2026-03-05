@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About Page</title>
+    <style>
+        nav {
+            background-color: #333;
+            padding: 1em;
+        }
+        nav ul {
+            list-style-type: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+        }
+        nav ul li {
+            margin-right: 1em;
+        }
+        nav ul li a {
+            color: white;
+            text-decoration: none;
+        }
+        nav ul li a:hover {
+            color: #ddd;
+        }
+        .audio-control {
+            margin: 1em 0;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <ul>
+            <li><a href="index.html">Home</a></li>
+            <li><a href="about.html">About</a></li>
+            <li><a href="contact.html">Contact</a></li>
+            <li><a href="birthdate.html">Birth Date</a></li>
+        </ul>
+    </nav>
+    <main>
+        <h1>About Us</h1>
+        <div class="audio-control">
+            <audio id="narration" src="narration_about.mp3"></audio>
+            <button id="playPause">Play Narration</button>
+        </div>
+        <p>This is the about page content.</p>
+    </main>
+    <script>
+        const audio = document.getElementById('narration');
+        const playPauseButton = document.getElementById('playPause');
+        
+        playPauseButton.addEventListener('click', () => {
+            if (audio.paused) {
+                audio.play();
+                playPauseButton.textContent = 'Pause Narration';
+            } else {
+                audio.pause();
+                playPauseButton.textContent = 'Play Narration';
+            }
+        });
+    </script>
+</body>
+</html>

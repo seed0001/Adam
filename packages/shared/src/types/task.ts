@@ -3,6 +3,15 @@ import { z } from "zod";
 export const TaskComplexitySchema = z.enum(["trivial", "simple", "complex", "multi-step"]);
 export type TaskComplexity = z.infer<typeof TaskComplexitySchema>;
 
+export const RequestIntentSchema = z.enum([
+  "brainstorming",
+  "build",
+  "research",
+  "skill-development",
+  "general",
+]);
+export type RequestIntent = z.infer<typeof RequestIntentSchema>;
+
 export const TaskStatusSchema = z.enum([
   "pending",
   "planning",

@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { exec } from "node:child_process";
+import { exec, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
@@ -14,6 +14,87 @@ const BLOCKED_PATTERNS = [
   /curl.*\|\s*(bash|sh|zsh)/,
   /wget.*\|\s*(bash|sh|zsh)/,
 ];
+
+export type ShellStreamEvent =
+  | { type: "LOG_CHUNK"; stream: "stdout" | "stderr"; chunk: string }
+  | { type: "ERROR_DETECTED"; summary: string; file?: string; line?: number };
+
+export async function shellStream(
+  command: string,
+  options: {
+    cwd?: string;
+    timeoutMs?: number;
+    callbacks?: {
+      onEvent?: (event: ShellStreamEvent) => void;
+      onExit?: (payload: { exitCode: number | null }) => void;
+    };
+  },
+): Promise<{ exitCode: number | null }> {
+  for (const pattern of BLOCKED_PATTERNS) {
+    if (pattern.test(command)) {
+      options.callbacks?.onEvent?.({
+        type: "ERROR_DETECTED",
+        summary: `Command blocked by safety filter: matches pattern ${pattern.source}`,
+      });
+      options.callbacks?.onExit?.({ exitCode: 1 });
+      return { exitCode: 1 };
+    }
+  }
+
+  return await new Promise<{ exitCode: number | null }>((resolve) => {
+    const child = spawn(command, {
+      cwd: options.cwd,
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let finished = false;
+    const finish = (exitCode: number | null) => {
+      if (finished) return;
+      finished = true;
+      options.callbacks?.onExit?.({ exitCode });
+      resolve({ exitCode });
+    };
+
+    const timeout = setTimeout(() => {
+      if (!finished) {
+        child.kill("SIGTERM");
+        options.callbacks?.onEvent?.({
+          type: "ERROR_DETECTED",
+          summary: `Command timed out after ${options.timeoutMs ?? 120_000}ms`,
+        });
+      }
+    }, options.timeoutMs ?? 120_000);
+
+    child.stdout?.on("data", (buf: Buffer) => {
+      options.callbacks?.onEvent?.({
+        type: "LOG_CHUNK",
+        stream: "stdout",
+        chunk: buf.toString(),
+      });
+    });
+
+    child.stderr?.on("data", (buf: Buffer) => {
+      options.callbacks?.onEvent?.({
+        type: "LOG_CHUNK",
+        stream: "stderr",
+        chunk: buf.toString(),
+      });
+    });
+
+    child.on("error", (err) => {
+      options.callbacks?.onEvent?.({
+        type: "ERROR_DETECTED",
+        summary: err.message,
+      });
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      finish(code);
+    });
+  });
+}
 
 export const shellTool = tool({
   description:

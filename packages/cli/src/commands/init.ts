@@ -305,7 +305,7 @@ export function registerInitCommand(program: Command): void {
             },
           ]);
 
-          config.voice = { enabled: true, autoStartSidecar: autoStart };
+          config.voice = { enabled: true, autoStartSidecar: autoStart, providers: { edge: true, lux: true, xtts: false } };
           console.warn(chalk.green("  ✓ Voice enabled"));
         }
       }

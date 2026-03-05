@@ -2,6 +2,7 @@ import {
   type InboundMessage,
   type OutboundMessage,
   type TaskGraph,
+  type RequestIntent,
   type AdamError,
   type Result,
   ok,
@@ -25,6 +26,8 @@ const logger = createLogger("core:agent");
 export type AgentConfig = {
   systemPrompt: string;
   name?: string;
+  /** Default voice profile ID for TTS. When set, OutboundMessage includes it so adapters can synthesize. */
+  defaultVoiceId?: string | null;
 };
 
 /**
@@ -53,7 +56,7 @@ export class Agent {
     skillStore: SkillStore | null = null,
   ) {
     this.classifier = new IntentClassifier(router);
-    this.planner = new Planner(router);
+    this.planner = new Planner(router, Array.from(tools.keys()));
     this.executor = new Executor(router, queue, tools);
     if (skillStore) {
       this.workshop = new SkillWorkshop(router, skillStore);
@@ -89,7 +92,7 @@ export class Agent {
           channelId: message.channelId,
           source: message.source,
           content: workshopResult.value,
-          voiceProfileId: null,
+          voiceProfileId: this.config.defaultVoiceId ?? null,
           replyToId: message.id,
           metadata: { workshopMode: true },
         });
@@ -100,17 +103,17 @@ export class Agent {
     const classifyResult = await this.classifier.classify(message.content, message.sessionId);
     if (classifyResult.isErr()) return err(classifyResult.error);
 
-    const { requiresPlanning, tier } = classifyResult.value;
+    const { requiresPlanning, tier, intent } = classifyResult.value;
     const modelTier = (tier === "embedding" || tier === "coder") ? ("capable" as const) : tier;
 
     let responseText: string;
 
     if (requiresPlanning) {
-      const graphResult = await this.planAndExecute(message);
+      const graphResult = await this.planAndExecute(message, intent);
       if (graphResult.isErr()) return err(graphResult.error);
       responseText = graphResult.value;
     } else {
-      const directResult = await this.directResponse(message, modelTier);
+      const directResult = await this.directResponse(message, modelTier, intent);
       if (directResult.isErr()) return err(directResult.error);
       responseText = directResult.value;
     }
@@ -134,7 +137,7 @@ export class Agent {
       channelId: message.channelId,
       source: message.source,
       content: responseText,
-      voiceProfileId: null,
+      voiceProfileId: this.config.defaultVoiceId ?? null,
       replyToId: message.id,
       metadata: {},
     };
@@ -145,6 +148,7 @@ export class Agent {
   private async directResponse(
     message: InboundMessage,
     tier: "fast" | "capable" | "coder",
+    intent?: RequestIntent,
   ): Promise<Result<string, AdamError>> {
     // Current session — full recent history
     const currentHistory = this.episodic
@@ -174,7 +178,7 @@ export class Agent {
       contextBlock += `This session:\n${currentLines}\n\n`;
     }
 
-    const system = this.buildEnrichedSystemPrompt();
+    const system = this.buildEnrichedSystemPrompt(intent);
     const prompt = contextBlock
       ? `${contextBlock}User: ${message.content}`
       : message.content;
@@ -209,7 +213,7 @@ export class Agent {
    *
    * Called on every turn so live edits to personality.md are reflected immediately.
    */
-  private buildEnrichedSystemPrompt(): string {
+  private buildEnrichedSystemPrompt(intent?: RequestIntent): string {
     let prompt = this.config.systemPrompt;
 
     // Layer 2: personality profile
@@ -243,6 +247,23 @@ export class Agent {
 
     // Layer 4: live time context — computed fresh on every turn so it never drifts
     prompt += `\n\n${this.buildTimeContext()}`;
+
+    // Layer 5: request intent — adapt response style based on classification
+    if (intent && intent !== "general") {
+      const intentGuidance: Record<RequestIntent, string> = {
+        brainstorming:
+          "User intent: BRAINSTORMING. Focus on ideation, exploration, options. Do NOT jump to implementation. No code, no tools unless explicitly asked. Explore ideas together.",
+        build:
+          "User intent: BUILD. User wants to create or implement. Use tools, code, execution. Ready to act.",
+        research:
+          "User intent: RESEARCH. Focus on gathering and synthesizing information. Explore, learn, summarize.",
+        "skill-development":
+          "User intent: SKILL DEVELOPMENT. User wants to design or adapt a new capability. Focus on the skill spec, triggers, constraints — not execution. If they say 'let's design a skill', route to workshop.",
+        general: "",
+      };
+      const guidance = intentGuidance[intent];
+      if (guidance) prompt += `\n\n---\n${guidance}\n---`;
+    }
 
     return prompt;
   }
@@ -487,8 +508,9 @@ Rules:
 
   private async planAndExecute(
     message: InboundMessage,
+    intent?: RequestIntent,
   ): Promise<Result<string, AdamError>> {
-    const graphResult = await this.planner.plan(message.content, message.sessionId);
+    const graphResult = await this.planner.plan(message.content, message.sessionId, intent);
     if (graphResult.isErr()) return err(graphResult.error);
 
     const graph: TaskGraph = { ...graphResult.value, status: "running" };

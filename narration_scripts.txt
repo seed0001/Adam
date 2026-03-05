@@ -1,0 +1,11 @@
+Home Page Narration Script
+"Welcome to our website! I’m thrilled to show you around. Right here on the Home page, you’ll find a quick overview of who we are and what we do. Take a look at the banner at the top—it highlights our mission and the latest updates. Just below, you’ll see featured content or promotions that we’re excited about. Feel free to click on any of these to learn more. And don’t miss the navigation bar at the top—it’s your gateway to explore everything we have to offer. Let’s head over to the About page next!"
+
+About Page Narration Script
+"Glad you’re here on the About page! This is where you get to know us better. Over here on the left, you’ll see a brief history of our journey—how we started and what drives us. In the center, we’ve got profiles of our amazing team; click on any photo to read their story. And on the right, check out our core values and mission statement. It’s what guides everything we do. Ready to see what we offer? Let’s move to the Services page!"
+
+Services Page Narration Script
+"Welcome to the Services page! This is the heart of what we provide. Scroll through the list of services right in the middle—each one has a short description. If something catches your eye, click on it for more details, including how it can help you. Over on the side, you’ll find testimonials from happy clients, giving you a sense of the impact we’ve made. Got questions or want to get started? There’s a ‘Request a Quote’ button at the bottom. Let’s wrap up with a quick stop at the Contact page!"
+
+Contact Page Narration Script
+"Here we are at the Contact page—your direct line to us! At the top, you’ll find our main contact details, including phone and email. Need to send a message right away? Fill out the form in the center; it’s super easy and goes straight to our team. Below that, check out our office location on the map if you’d like to visit. And don’t forget, we’re also on social media—links are at the bottom to follow us for updates. Thanks for touring with me; feel free to explore more on your own!"

@@ -27,14 +27,15 @@ adam/
 │   └── web/           # React 18 dashboard (Vite + Tailwind CSS)
 └── packages/
     ├── cli/           # adam init · chat · start · stop · status · voice
-    ├── core/          # Agent reasoning loop, Skill Workshop, Scratchpad, Personality
+    ├── core/          # Agent reasoning loop, Skill Workshop, Scratchpad, Personality, BuildSupervisor
     ├── memory/        # SQLite stores: EpisodicStore, ProfileStore, WorkingMemory
     ├── models/        # ProviderRegistry, ModelRouter, budget tracking
-    ├── security/      # CredentialVault, AuditLog, PermissionRegistry
-    ├── skills/        # Tool definitions, model-backed code tools, SkillSchema, SkillStore
-    ├── adapters/      # Adapter implementations: CLI, Telegram, Discord
-    ├── voice/         # LuxTTS Python sidecar integration
-    └── shared/        # Config schemas (Zod), shared types, Result utilities, logger
+    ├── security/     # CredentialVault, AuditLog, PermissionRegistry
+    ├── skills/       # Tool definitions, model-backed code tools, SkillSchema, SkillStore
+    ├── adapters/     # Adapter implementations: CLI, Telegram, Discord
+    ├── voice/        # LuxTTS Python sidecar, Edge/XTTS providers
+    ├── diagnostics/  # Codebase analyzer, pipeline registry, test runner
+    └── shared/       # Config schemas (Zod), shared types, Result utilities, logger
 ```
 
 Managed with pnpm workspaces and Turborepo. Every package is `"type": "module"`, exports ESM, and ships its own type declarations.
@@ -51,13 +52,16 @@ The foundation. Contains everything every other package imports.
 - `CloudProviderConfigSchema`, `HuggingFaceConfigSchema`, `OpenAICompatibleConfigSchema`
 - `MemoryConfigSchema` — `decayHalfLifeDays`, `decayMinConfidence`, `consolidateAfterDays`
 - `BudgetConfigSchema`, `DaemonConfigSchema`, `AdapterConfigSchema`
+- `VoiceConfigSchema` — `enabled`, `autoStartSidecar`, `providers` (edge, lux, xtts)
 
 **Types:**
 - `ModelTier` — `"fast" | "capable" | "coder" | "embedding"`
 - `ModelUsage` — per-call tracking for cost accounting
 - `InboundMessage`, `OutboundMessage` — the message envelope that flows through the agent
+- `RequestIntent` — `"brainstorming" | "build" | "research" | "skill-development" | "general"`
 - `Result<T, E>` — `neverthrow` based error types used everywhere in the codebase
 - `AdamError` — typed error with a code and message
+- `VoiceProvider`, `VoiceProfile`, `EdgeVoiceConfig`, `LuxVoiceConfig`, `XTTSVoiceConfig`, `VoiceOption`
 
 **Utilities:**
 - `generateId()`, `generateSessionId()` — UUID generation
@@ -168,6 +172,7 @@ Wraps `ProviderRegistry` with:
 | `write_file` | Writes content to a path (creates dirs as needed) |
 | `list_directory` | Lists files and subdirectories at a path |
 | `shell` | Runs a shell command, returns stdout/stderr/exit code |
+| `shellStream` | Streaming shell execution with LOG_CHUNK events (used by BuildSupervisor) |
 
 **Model-backed code tools** (via `createCodeTools(router, sessionId)`):
 
@@ -211,6 +216,13 @@ Uses the `"fast"` model tier to classify each incoming message into:
 - `trivial` — answer directly, no tools needed
 - `simple` — answer with possible tool use
 - `complex` — requires planning
+
+**Intent** (what the user wants from this exchange):
+- `brainstorming` — ideation, exploration; do not jump to implementation
+- `build` — ready for tools, code, execution
+- `research` — gather and synthesize information
+- `skill-development` — design a new capability; focus on spec, not execution
+- `general` — conversational or mixed
 - `multi-step` — requires a full task DAG
 
 Returns `{ requiresPlanning: boolean, tier: ModelTier }`.
@@ -258,6 +270,24 @@ LLM-driven component for skill design. Takes a user intent string and uses `rout
 
 `isWorkshopTrigger(message)` detects phrases like "let's design a skill", "build a capability", "create a workflow" to automatically route into workshop mode.
 
+**`BuildSupervisor`** (see [BUILD_SUPERVISOR.md](BUILD_SUPERVISOR.md))
+
+Background build pipeline: checkout → dependency_install → analyze → patch → lint → build → test → coverage → review. Runs in a separate worker process. Agent tools: `spawn_build_job`, `get_build_job_status`, `cancel_build_job`, `summarize_build_job`.
+
+---
+
+## Package: `@adam/diagnostics`
+
+System diagnostics for codebase analysis and pipeline testing.
+
+**`analyzeCodebase(rootDir)`** — Scans `packages/` and `apps/`, extracts exports (function, class, const, type, interface) and imports, detects packages with tests.
+
+**`PIPELINE_REGISTRY`** — Registry of pipeline stages (classify, plan, execute, observe, plus BuildSupervisor stages).
+
+**`runAllTests(rootDir)`** — Runs Vitest with JSON reporter across core, shared, memory, security, adapters, models, skills, voice, cli; parses results.
+
+**Dynamic tests** — User-defined tests (JSON schema: id, name, target, input, expected) stored and runnable via API.
+
 ---
 
 ## Package: `@adam/adapters`
@@ -287,11 +317,12 @@ Responsibilities:
 - Hosts a REST API on port 18800 (configurable)
 - Serves the built web UI as static files
 - Runs the `MemoryConsolidator` concurrently
+- Spawns BuildSupervisor worker for build jobs
 
 **REST API surface** (`/api/*`):
 
 | Endpoint | Description |
-|---|---|
+|----------|-------------|
 | `GET /api/status` | Daemon health, active adapters, vault-verified model pool |
 | `POST /api/chat` | Send a message to the agent, get a response |
 | `GET /api/memory` | List profile facts |
@@ -304,6 +335,15 @@ Responsibilities:
 | `PATCH /api/skills/:id` | Edit a draft spec (notes, steps, constraints, successCriteria) |
 | `DELETE /api/skills/:id` | Delete a spec |
 | `POST /api/skills/:id/action/:action` | Lifecycle transition (approve, latent, activate, deprecate) |
+| `GET /api/jobs` | List build jobs |
+| `POST /api/jobs` | Spawn a build job |
+| `GET /api/jobs/:id` | Get job status and events |
+| `POST /api/jobs/:id/cancel` | Request job cancellation |
+| `GET /api/diagnostics/analysis` | Codebase analysis |
+| `GET /api/diagnostics/pipeline` | Pipeline stages |
+| `GET /api/diagnostics/tests` | Dynamic tests |
+| `POST /api/diagnostics/run` | Run all Vitest tests |
+| `GET /api/diagnostics/results` | Last test run results |
 | `GET /api/vault/status` | Which vault slots have keys set (never returns key values) |
 | `POST /api/vault/:slot` | Set a key in the vault |
 | `DELETE /api/vault/:slot` | Remove a key from the vault |
@@ -319,7 +359,7 @@ React 18 + Vite + Tailwind CSS single-page app. All state is server-derived (no 
 **Tabs:**
 
 | Tab | Component | What it does |
-|---|---|---|
+|-----|------------|--------------|
 | Chat | `Chat.tsx` | Full chat UI, shows active model, polls for responses |
 | Memory | `Memory.tsx` | Profile fact browser, health bars, delete controls |
 | Status | `Status.tsx` | Daemon health, adapter status, model pool display |
@@ -327,10 +367,12 @@ React 18 + Vite + Tailwind CSS single-page app. All state is server-derived (no 
 | Providers | `Providers.tsx` | Cloud providers (API keys), local providers (fast/capable/coder models), adapter tokens |
 | Scratch Pad | `Scratchpad.tsx` | View/edit the scratchpad, auto-polls every 12s |
 | Skills | `Skills.tsx` | Skill spec list, detail view, lifecycle action buttons |
+| Voices | `Voices.tsx` | Voice profiles (Edge, Lux, XTTS) |
+| Diagnostics | `Diagnostics.tsx` | Codebase analysis, pipeline view, run tests, dynamic test editor |
 
 **API client** (`apps/web/src/lib/api.ts`):
 
-Typed wrapper around `fetch`. All API types are defined here — `StatusData`, `ProvidersConfig`, `LocalProviderConfig` (with `models.coder`), `SkillSpec`, `VaultStatus`, etc.
+Typed wrapper around `fetch`. All API types are defined here — `StatusData`, `ProvidersConfig`, `LocalProviderConfig` (with `models.coder`), `SkillSpec`, `VaultStatus`, `DiagnosticsAnalysis`, `DiagnosticRunResult`, etc.
 
 ---
 
@@ -339,8 +381,8 @@ Typed wrapper around `fetch`. All API types are defined here — `StatusData`, `
 Commander.js-based CLI. Commands:
 
 | Command | What it does |
-|---|---|
-| `adam init` | Interactive wizard using `inquirer` — sets provider keys (stored to vault), adapter tokens, budget limits |
+|---------|--------------|
+| `adam init` | Interactive wizard using `inquirer` — sets provider keys (stored to vault), adapter tokens, budget limits, voice providers |
 | `adam chat` | Loads config, builds model pool, instantiates agent, starts REPL loop |
 | `adam start` | Spawns the daemon as a background process, writes PID to `~/.adam/daemon.pid` |
 | `adam stop` | Reads PID file, sends `SIGTERM` |

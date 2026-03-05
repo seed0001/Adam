@@ -1,9 +1,11 @@
 node_modules/
 dist/
 .turbo/
+.diagnostics/
 *.env
 *.env.*
 !*.env.example
+cookies.json
 coverage/
 *.log
 .DS_Store

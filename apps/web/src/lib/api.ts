@@ -57,6 +57,10 @@ export type StatusData = {
 export type ChatResponse = {
   response: string;
   sessionId: string;
+  /** Base64-encoded MP3 when voice is enabled and a default voice profile exists */
+  audioBase64?: string;
+  /** Base64-encoded PNG/JPEG when generate_chat_background was used */
+  backgroundBase64?: string;
 };
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -152,6 +156,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message, sessionId }),
     }),
+
+  getChatBackground: (sessionId: string) =>
+    apiFetch<{ backgroundBase64: string }>(
+      `/api/chat/background?sessionId=${encodeURIComponent(sessionId)}`,
+    ).catch(() => null),
 
   getStatus: () => apiFetch<StatusData>("/api/status"),
 
@@ -269,4 +278,222 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body ?? {}),
     }),
+
+  // ── Voices ─────────────────────────────────────────────────────────────────
+
+  listVoices: () =>
+    apiFetch<{ voices: VoiceProfile[] }>("/api/voices").then((r) => r.voices),
+
+  listEdgeVoices: () =>
+    apiFetch<{ voices: VoiceOption[] }>("/api/voices/edge").then((r) => r.voices),
+
+  createVoice: (input: CreateVoiceInput) =>
+    apiFetch<{ voice: VoiceProfile }>("/api/voices", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }).then((r) => r.voice),
+
+  getVoice: (id: string) =>
+    apiFetch<{ voice: VoiceProfile }>(`/api/voices/${id}`).then((r) => r.voice),
+
+  patchVoice: (id: string, patch: Partial<CreateVoiceInput>) =>
+    apiFetch<{ voice: VoiceProfile }>(`/api/voices/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }).then((r) => r.voice),
+
+  deleteVoice: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/voices/${id}`, { method: "DELETE" }),
+
+  synthesizeVoice: (text: string, voiceProfileId: string, format?: "path" | "base64") =>
+    apiFetch<SynthesisResult>("/api/voices/synthesize", {
+      method: "POST",
+      body: JSON.stringify({ text, voiceProfileId, format: format ?? "base64" }),
+    }),
+
+  // ── Diagnostics ────────────────────────────────────────────────────────────
+
+  getDiagnosticsAnalysis: () => apiFetch<DiagnosticsAnalysis>("/api/diagnostics/analysis"),
+
+  getDiagnosticsPipeline: () => apiFetch<DiagnosticsPipeline>("/api/diagnostics/pipeline"),
+
+  getDiagnosticsTests: () =>
+    apiFetch<{ tests: DynamicTestDefinition[] }>("/api/diagnostics/tests").then((r) => r.tests),
+
+  setDiagnosticsTests: (tests: DynamicTestDefinition[]) =>
+    apiFetch<{ tests: DynamicTestDefinition[] }>("/api/diagnostics/tests", {
+      method: "POST",
+      body: JSON.stringify({ tests }),
+    }).then((r) => r.tests),
+
+  addDiagnosticsTest: (test: DynamicTestDefinition) =>
+    apiFetch<{ tests: DynamicTestDefinition[] }>("/api/diagnostics/tests", {
+      method: "POST",
+      body: JSON.stringify({ test }),
+    }).then((r) => r.tests),
+
+  removeDiagnosticsTest: (id: string) =>
+    apiFetch<{ tests: DynamicTestDefinition[] }>(`/api/diagnostics/tests/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }).then((r) => r.tests),
+
+  runDiagnostics: () => apiFetch<DiagnosticRunResult>("/api/diagnostics/run", { method: "POST" }),
+
+  getDiagnosticsResults: () => apiFetch<DiagnosticRunResult | { error: string }>("/api/diagnostics/results"),
+
+  runPipelineTest: () =>
+    apiFetch<PipelineTestResult>("/api/diagnostics/pipeline-test", { method: "POST" }),
+};
+
+// ── Diagnostics types ─────────────────────────────────────────────────────────
+
+export type ModuleExport = { kind: string; name: string; line: number };
+export type ModuleInfo = { path: string; packageName: string; exports: ModuleExport[]; imports: string[] };
+export type DiagnosticsAnalysis = {
+  modules: ModuleInfo[];
+  packages: { name: string; path: string; hasTests: boolean }[];
+  totalExports: number;
+  totalModules: number;
+  analyzedAt: string;
+};
+export type PipelineStage = { id: string; name: string; module: string; functionName: string; description: string };
+export type DiagnosticsPipeline = { stages: PipelineStage[]; flow: string[] };
+export type DynamicTestDefinition = {
+  id: string;
+  name: string;
+  target: string;
+  targetPath?: string;
+  input: unknown;
+  expected?: unknown;
+  timeoutMs?: number;
+};
+export type SingleTestResult = {
+  name: string;
+  file: string;
+  status: "passed" | "failed" | "skipped" | "timeout" | "error";
+  durationMs?: number;
+  error?: string;
+};
+export type PackageTestResult = {
+  package: string;
+  passed: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  durationMs: number;
+  tests: SingleTestResult[];
+};
+export type DiagnosticRunResult = {
+  runId: string;
+  startedAt: string;
+  completedAt: string;
+  packageResults: PackageTestResult[];
+  summary: {
+    totalPassed: number;
+    totalFailed: number;
+    totalSkipped: number;
+    totalTests: number;
+    durationMs: number;
+  };
+};
+
+export type PipelineTestResult = {
+  ok: boolean;
+  prompt: string;
+  response?: string;
+  error?: string;
+  errorCode?: string;
+  diagnostics: {
+    workspace: string;
+    targetProjectRoot?: string;
+    requireOllama?: boolean;
+    backendMode?: "auto" | "agent" | "codex" | "claude";
+    backendOrder?: Array<"agent" | "codex" | "claude">;
+    maxAttempts?: number;
+    pool: { fast: string | null; capable: string | null; coder: string | null; ollamaInPool: boolean };
+    configOllamaEnabled: boolean;
+    ollamaProbe?: { reachable: boolean; status: string; message: string };
+  };
+  attempts?: Array<{
+    attempt: number;
+    prompt: string;
+    backendUsed?: "agent" | "codex" | "claude";
+    backendTrace: Array<{
+      backend: "agent" | "codex" | "claude";
+      available?: boolean;
+      command?: string;
+      argsPreview?: string[];
+      exitCode?: number | null;
+      timedOut?: boolean;
+      stdoutPreview?: string;
+      stderrPreview?: string;
+      error?: string;
+    }>;
+    ok: boolean;
+    durationMs: number;
+    responseText?: string;
+    jsonParseOk: boolean;
+    jsonParseError?: string;
+    declaredPaths: string[];
+    fsSnapshot: { exists: boolean; totalFiles: number; pythonFiles: string[]; files: string[] };
+    failureReasons: string[];
+    error?: string;
+    errorCode?: string;
+  }>;
+  summary?: {
+    successfulAttempt: number | null;
+    attemptsRun: number;
+    projectRoot: string;
+    filesCreated: number;
+    pythonFilesCreated: number;
+  };
+  nextActions?: string[];
+};
+
+// ── Voice types ──────────────────────────────────────────────────────────────
+
+export type VoiceProvider = "edge" | "lux" | "xtts";
+
+export type EdgeVoiceConfig = { voiceId: string; rate?: string; pitch?: string };
+export type LuxVoiceConfig = {
+  referenceAudioPath: string;
+  params?: { rms?: number; tShift?: number; numSteps?: number; speed?: number; returnSmooth?: boolean; refDuration?: number };
+};
+export type XTTSVoiceConfig = { referenceAudioPath: string; language?: string; speakerId?: string };
+
+export type VoiceProfile = {
+  id: string;
+  name: string;
+  description: string;
+  provider: VoiceProvider;
+  providerConfig: EdgeVoiceConfig | LuxVoiceConfig | XTTSVoiceConfig;
+  persona: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VoiceOption = {
+  id: string;
+  name: string;
+  locale?: string;
+  gender?: string;
+  provider: VoiceProvider;
+};
+
+export type CreateVoiceInput = {
+  name: string;
+  description?: string;
+  provider: VoiceProvider;
+  providerConfig: EdgeVoiceConfig | LuxVoiceConfig | XTTSVoiceConfig;
+  persona?: string;
+  isDefault?: boolean;
+};
+
+export type SynthesisResult = {
+  audioPath: string;
+  durationMs: number;
+  sampleRate: number;
+  generatedAt: string;
+  audioBase64?: string;
 };

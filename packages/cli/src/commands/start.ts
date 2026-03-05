@@ -13,13 +13,13 @@ export function getDaemonPidFile(): string {
 function findDaemonScript(): string | null {
   const __dir = dirname(fileURLToPath(import.meta.url));
 
-  // npm install: daemon bundled alongside CLI as dist/daemon.js
-  const bundled = join(__dir, "daemon.js");
-  if (existsSync(bundled)) return bundled;
-
   // monorepo dev: packages/cli/dist/ → ../../.. → workspace root → apps/daemon/dist
   const mono = join(__dir, "..", "..", "..", "apps", "daemon", "dist", "index.js");
   if (existsSync(mono)) return mono;
+
+  // npm install: daemon bundled alongside CLI as dist/daemon.js
+  const bundled = join(__dir, "daemon.js");
+  if (existsSync(bundled)) return bundled;
 
   return null;
 }
