@@ -12,7 +12,6 @@ import {
   adamError,
   PORTS,
   TIMEOUTS,
-  LUXTTS,
   createLogger,
 } from "@adam/shared";
 
@@ -76,7 +75,7 @@ export class VoiceClient {
     return this.waitForReady();
   }
 
-  async stop(): Promise<void> {
+  stop(): void {
     if (this.process) {
       this.process.kill("SIGTERM");
       this.process = null;
@@ -98,8 +97,6 @@ export class VoiceClient {
     }
 
     try {
-      const start = Date.now();
-
       const response = await fetch(`${this.baseUrl}/synthesize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

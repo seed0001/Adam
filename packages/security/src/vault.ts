@@ -31,7 +31,12 @@ async function loadKeytarBackend(): Promise<VaultBackend | null> {
   try {
     // Dynamic import so a load failure doesn't crash the process
     const mod = await import("keytar");
-    const kt = (mod.default ?? mod) as typeof import("keytar");
+    const kt = (mod.default ?? mod) as {
+      setPassword(service: string, account: string, password: string): Promise<void>;
+      getPassword(service: string, account: string): Promise<string | null>;
+      deletePassword(service: string, account: string): Promise<boolean>;
+      findCredentials(service: string): Promise<Array<{ account: string; password: string }>>;
+    };
     // Verify the functions are actually there (native build might be missing)
     if (typeof kt.setPassword !== "function") return null;
     return {
@@ -76,7 +81,7 @@ function decryptJson(b64: string, key: Buffer): unknown {
   const enc = buf.subarray(IV_LEN + TAG_LEN);
   const decipher = createDecipheriv(ALG, key, iv);
   decipher.setAuthTag(tag);
-  const plain = decipher.update(enc) + decipher.final("utf8");
+  const plain = Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8");
   return JSON.parse(plain) as unknown;
 }
 
@@ -106,28 +111,31 @@ class FileVaultBackend implements VaultBackend {
     writeFileSync(this.path, encryptJson(store, this.key), "utf-8");
   }
 
-  async set(svc: string, account: string, value: string): Promise<void> {
+  set(svc: string, account: string, value: string): Promise<void> {
     const store = this.read();
     if (!store[svc]) store[svc] = {};
-    store[svc]![account] = value;
+    const serviceStore = store[svc];
+    if (serviceStore) serviceStore[account] = value;
     this.write(store);
+    return Promise.resolve();
   }
 
-  async get(svc: string, account: string): Promise<string | null> {
-    return this.read()[svc]?.[account] ?? null;
+  get(svc: string, account: string): Promise<string | null> {
+    return Promise.resolve(this.read()[svc]?.[account] ?? null);
   }
 
-  async delete(svc: string, account: string): Promise<boolean> {
+  delete(svc: string, account: string): Promise<boolean> {
     const store = this.read();
-    if (!store[svc]?.[account]) return false;
-    delete store[svc]![account];
+    const serviceStore = store[svc];
+    if (!serviceStore || !serviceStore[account]) return Promise.resolve(false);
+    delete serviceStore[account];
     this.write(store);
-    return true;
+    return Promise.resolve(true);
   }
 
-  async findCredentials(svc: string): Promise<Array<{ account: string; password: string }>> {
+  findCredentials(svc: string): Promise<Array<{ account: string; password: string }>> {
     const accounts = this.read()[svc] ?? {};
-    return Object.entries(accounts).map(([account, password]) => ({ account, password }));
+    return Promise.resolve(Object.entries(accounts).map(([account, password]) => ({ account, password })));
   }
 }
 
