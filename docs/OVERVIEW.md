@@ -9,6 +9,8 @@ A complete technical overview of the Adam codebase: what each component does, ho
 Adam is a self-hosted autonomous agent that runs as a persistent process on your local machine. It is not a wrapper around a chat API. It has:
 
 - A multi-step reasoning loop with intent classification, hierarchical planning, and structured execution
+- **Self-Repair Loop**: Automatic error diagnosis and patch proposals when tool execution fails (see [SELF_REPAIR.md](SELF_REPAIR.md))
+- **Continuous Improvement**: Background Review Loop for proactive system growth and trait tracking (see [REINFORCEMENT.md](REINFORCEMENT.md))
 - Four-layer persistent memory (episodic, semantic, profile, working) with a neural-CA-inspired lifecycle
 - Full filesystem, shell, and web tool access via sandboxed child processes
 - A division-of-labor architecture where a cloud model plans and a local coder model implements
@@ -34,7 +36,7 @@ adam/
     ├── skills/       # Tool definitions, model-backed code tools, SkillSchema, SkillStore
     ├── adapters/     # Adapter implementations: CLI, Telegram, Discord
     ├── voice/        # LuxTTS Python sidecar, Edge/XTTS providers
-    ├── diagnostics/  # Codebase analyzer, pipeline registry, test runner
+    ├── diagnostics/  # Codebase analyzer, pipeline registry, test runner, PatchService, ReinforcementService
     └── shared/       # Config schemas (Zod), shared types, Result utilities, logger
 ```
 
@@ -253,8 +255,10 @@ The outer loop. For each `InboundMessage`:
 3. Classifies the message
 4. Plans if needed
 5. Executes
-6. Writes the turn to episodic memory
-7. Fire-and-forgets: fact extraction, personality shaping, scratchpad update
+6. **Self-Repair** (Reflex Loop) — if execution fails, trigger `PatchService` to propose a fix
+7. Writes the turn to episodic memory
+8. **Reinforce** — updates trait scores based on interaction quality
+9. Fire-and-forgets: fact extraction, personality shaping, scratchpad update
 
 **`PersonalityStore`**
 
@@ -425,9 +429,10 @@ User input (CLI / Discord / Telegram / Web dashboard)
          ├─ EpisodicStore.insert(turn)
          │
          └─ Fire-and-forget (async, non-blocking):
-              ├─ ProfileStore.extractFacts(conversation)
-              ├─ PersonalityStore.maybeUpdate(conversation)
-              └─ ScratchpadStore.maybeUpdate(conversation)
+             ├─ ProfileStore.extractFacts(conversation)
+             ├─ PersonalityStore.maybeUpdate(conversation)
+             ├─ ReinforcementService.recordFeedback(conversation)
+             └─ ScratchpadStore.maybeUpdate(conversation)
          │
          ▼
    OutboundMessage { content, sessionId, metadata }

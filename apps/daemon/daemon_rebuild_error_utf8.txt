@@ -1,0 +1,37 @@
+﻿
+> @adam/daemon@0.1.0 build C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon
+> tsup src/index.ts src/build-supervisor-worker.ts --format esm --clean "--filter" "@adam/daemon"
+
+node.exe : [31mCACError: Unknown option `--filter`
+At C:\Users\aztre\AppData\Roaming\npm\pnpm.ps1:24 char:5
++     & "node$exe"  "$basedir/node_modules/pnpm/bin/pnpm.cjs" 
+$args
++     
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([31mCACError: Un 
+   known option `--filter`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    at Command.checkUnknownOptions (C:\Users\aztre\Desktop\New 
+folder (45)\adam\node_modules\.pnpm\cac@6.7.14\node_modules\cac
+\dist\index.js:404:17)
+    at CAC.runMatchedCommand (C:\Users\aztre\Desktop\New 
+folder (45)\adam\node_modules\.pnpm\cac@6.7.14\node_modules\cac
+\dist\index.js:602:13)
+    at main (C:\Users\aztre\Desktop\New folder (45)\adam\node_m
+odules\.pnpm\tsup@8.5.1_jiti@1.21.7_postcss@8.5.6_typescript@5.
+9.3\node_modules\tsup\dist\chunk-DI5BO6XE.js:148:13)
+    at Object.<anonymous> (C:\Users\aztre\Desktop\New folder (4
+5)\adam\node_modules\.pnpm\tsup@8.5.1_jiti@1.21.7_postcss@8.5.6
+_typescript@5.9.3\node_modules\tsup\dist\cli-default.js:12:23)
+    at Module._compile 
+(node:internal/modules/cjs/loader:1554:14)
+    at Object..js (node:internal/modules/cjs/loader:1706:10)
+    at Module.load (node:internal/modules/cjs/loader:1289:32)
+    at Function._load 
+(node:internal/modules/cjs/loader:1108:12)
+    at TracingChannel.traceSync 
+(node:diagnostics_channel:322:14)
+    at wrapModuleLoad 
+(node:internal/modules/cjs/loader:220:24)[39m
+ΓÇëELIFECYCLEΓÇë Command failed with exit code 1.

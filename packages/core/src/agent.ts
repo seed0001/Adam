@@ -11,15 +11,17 @@ import {
   createLogger,
 } from "@adam/shared";
 import type { ModelRouter } from "@adam/models";
-import type { EpisodicStore, ProfileStore } from "@adam/memory";
+import type { EpisodicStore, ProfileStore, SessionStore, PatchStore } from "@adam/memory";
 import { IntentClassifier } from "./classifier.js";
 import { Planner } from "./planner.js";
 import { Executor, type ToolRegistry } from "./executor.js";
+import { PatchService } from "@adam/diagnostics";
 import type { TaskQueue } from "./queue.js";
 import type { PersonalityStore } from "./personality.js";
 import type { ScratchpadStore } from "./scratchpad.js";
 import { SkillWorkshop, isWorkshopTrigger, formatSkillSummary } from "./workshop.js";
-import type { SkillStore } from "@adam/skills";
+import { agentEventBus } from "./agent-events.js";
+import { type SkillStore, type SkillSpec } from "@adam/skills";
 
 const logger = createLogger("core:agent");
 
@@ -50,10 +52,13 @@ export class Agent {
     private episodic: EpisodicStore,
     private tools: ToolRegistry,
     private config: AgentConfig,
+    private sessions: SessionStore | null = null,
     private profile: ProfileStore | null = null,
     private personality: PersonalityStore | null = null,
     private scratchpad: ScratchpadStore | null = null,
     skillStore: SkillStore | null = null,
+    private patchStore: PatchStore | null = null,
+    private patchService: PatchService | null = null,
   ) {
     this.classifier = new IntentClassifier(router);
     this.planner = new Planner(router, Array.from(tools.keys()));
@@ -64,7 +69,18 @@ export class Agent {
   }
 
   async process(message: InboundMessage): Promise<Result<OutboundMessage, AdamError>> {
-    logger.info("Processing message", { source: message.source, sessionId: message.sessionId });
+    logger.info("Processing message", { source: message.source, sessionId: message.sessionId, userId: message.userId });
+
+    // Ensure session persistence so we have a record of the user ID
+    if (this.sessions) {
+      this.sessions.ensureSession(
+        message.sessionId,
+        message.source,
+        message.userId,
+        message.channelId,
+        message.metadata
+      );
+    }
 
     this.episodic.insert({
       sessionId: message.sessionId,
@@ -100,6 +116,13 @@ export class Agent {
       // If workshop fails, fall through to normal processing
     }
 
+    agentEventBus.emitEvent({
+      sessionId: message.sessionId,
+      type: "status",
+      message: "🔍 CLASSIFYING USER INTENT...",
+      timestamp: new Date(),
+    });
+
     const classifyResult = await this.classifier.classify(message.content, message.sessionId);
     if (classifyResult.isErr()) return err(classifyResult.error);
 
@@ -108,12 +131,31 @@ export class Agent {
 
     let responseText: string;
 
+    const tools = this.getAvailableTools(message);
+    const executor = new Executor(this.router, this.queue, tools);
+
+    agentEventBus.emitEvent({
+      sessionId: message.sessionId,
+      type: "status",
+      message: requiresPlanning
+        ? `✅ IDENTIFIED: ${intent.toUpperCase()} (Requires Planning)`
+        : `✅ IDENTIFIED: ${intent.toUpperCase()} (Responding Directly)`,
+      data: { intent, requiresPlanning, tier: modelTier },
+      timestamp: new Date(),
+    });
+
     if (requiresPlanning) {
-      const graphResult = await this.planAndExecute(message, intent);
+      const graphResult = await this.planAndExecute(message, executor, intent);
       if (graphResult.isErr()) return err(graphResult.error);
       responseText = graphResult.value;
     } else {
-      const directResult = await this.directResponse(message, modelTier, intent);
+      agentEventBus.emitEvent({
+        sessionId: message.sessionId,
+        type: "status",
+        message: "💭 GENERATING DIRECT RESPONSE...",
+        timestamp: new Date(),
+      });
+      const directResult = await this.directResponse(message, modelTier, tools, intent);
       if (directResult.isErr()) return err(directResult.error);
       responseText = directResult.value;
     }
@@ -148,6 +190,7 @@ export class Agent {
   private async directResponse(
     message: InboundMessage,
     tier: "fast" | "capable" | "coder",
+    tools: ToolRegistry,
     intent?: RequestIntent,
   ): Promise<Result<string, AdamError>> {
     // Current session — full recent history
@@ -183,7 +226,7 @@ export class Agent {
       ? `${contextBlock}User: ${message.content}`
       : message.content;
 
-    const toolsObject = Object.fromEntries(this.tools);
+    const toolsObject = Object.fromEntries(tools);
     const hasTools = Object.keys(toolsObject).length > 0;
 
     if (hasTools) {
@@ -356,6 +399,14 @@ Examples: [{"key":"os","value":"Windows","category":"context","confidence":0.9}]
           confidence: c,
           source: "auto-extracted",
         });
+
+        agentEventBus.emitEvent({
+          sessionId,
+          type: "memory",
+          message: `Learned: ${k} = ${v}`,
+          data: { key: k, value: v, category: cat, confidence: c },
+          timestamp: new Date(),
+        });
       }
     } catch {
       // best-effort — never throw
@@ -412,6 +463,13 @@ Rules:
       if (response.includes("#") || response.includes("##") || response.length > 100) {
         this.personality.save(response);
         logger.info("Personality profile updated from conversation");
+
+        agentEventBus.emitEvent({
+          sessionId,
+          type: "context",
+          message: "Personality profile evolved based on conversation style.",
+          timestamp: new Date(),
+        });
       }
     } catch {
       // best-effort — never throw
@@ -500,6 +558,13 @@ Rules:
       if (response.includes("## Topic") && response.length > 40) {
         this.scratchpad.save(response);
         logger.info("Scratchpad updated");
+
+        agentEventBus.emitEvent({
+          sessionId,
+          type: "context",
+          message: "Scratchpad updated with new topics/ideas.",
+          timestamp: new Date(),
+        });
       }
     } catch {
       // best-effort — never throw
@@ -508,12 +573,24 @@ Rules:
 
   private async planAndExecute(
     message: InboundMessage,
+    executor: Executor,
     intent?: RequestIntent,
   ): Promise<Result<string, AdamError>> {
-    const graphResult = await this.planner.plan(message.content, message.sessionId, intent);
+    // Only allow the planner to see tools that the user is authorized to use
+    const toolNames = Array.from(this.getAvailableTools(message).keys());
+    const graphResult = await this.planner.plan(message.content, message.sessionId, toolNames, intent);
     if (graphResult.isErr()) return err(graphResult.error);
 
     const graph: TaskGraph = { ...graphResult.value, status: "running" };
+
+    agentEventBus.emitEvent({
+      sessionId: message.sessionId,
+      type: "status",
+      message: `Plan generated with ${graph.tasks.length} tasks.`,
+      data: { graphId: graph.id },
+      timestamp: new Date(),
+    });
+
     const enqueueResult = this.queue.enqueueGraph(graph);
     if (enqueueResult.isErr()) return err(enqueueResult.error);
 
@@ -521,7 +598,44 @@ Rules:
     const maxIterations = 50;
 
     while (!this.queue.isGraphComplete(graph.id) && iterations < maxIterations) {
-      await this.executor.executeReadyTasks(graph.id);
+      await executor.executeReadyTasks(graph.id);
+
+      // Reflex Loop: Check for failed tasks and propose repair patches
+      const failed = this.queue.getFailedTasks(graph.id);
+      if (failed.length > 0 && this.patchService && this.patchStore) {
+        for (const task of failed) {
+          logger.info("Task failed, triggering diagnostic reflex", { taskId: task.id });
+
+          const result = await this.patchService.diagnoseFailure(message.sessionId, task.error ?? "Task failed", {
+            taskId: task.id,
+            description: task.description,
+            input: task.input,
+            logs: (task as any).errorContext?.["stack"] as string | undefined, // Pass stack trace if available
+          });
+
+          if (result.isOk()) {
+            const proposal = result.value;
+            this.patchStore.create({
+              source: "reflex",
+              taskId: task.id,
+              filePath: proposal.patch.filePath,
+              diff: proposal.patch.diff,
+              rationale: proposal.rationale,
+            });
+
+            agentEventBus.emitEvent({
+              sessionId: message.sessionId,
+              type: "status",
+              message: `🛠️ Task failed. Proposing a repair patch for ${proposal.patch.filePath}.`,
+              data: { taskId: task.id, proposal },
+              timestamp: new Date(),
+            });
+
+            logger.info("Proposed repair patch", { taskId: task.id, file: proposal.patch.filePath });
+          }
+        }
+      }
+
       iterations++;
       await sleep(100);
     }
@@ -538,6 +652,41 @@ Rules:
       system: this.config.systemPrompt,
       prompt: `All planned tasks have been completed. Provide a final summary response to the user's original request: "${message.content}"`,
     });
+  }
+
+  /**
+   * Filter tools for non-privileged Discord users.
+   * Prevents them from seeing/calling dangerous tools (shell, write, browser, code).
+   */
+  private getAvailableTools(message: InboundMessage): ToolRegistry {
+    if (message.source !== "discord" || (message.metadata as any).isPrivileged) {
+      return this.tools;
+    }
+
+    const RESTRICTED_TOOLS = [
+      "shell",
+      "write_file",
+      "browser_navigate",
+      "browser_click",
+      "browser_type",
+      "browser_scroll",
+      "browser_back",
+      "browser_new_tab",
+      "browser_close",
+      "publish_to_suno",
+      "code_write_file",
+      "code_edit_file",
+      "code_scaffold",
+    ];
+
+    const filtered = new Map<string, any>();
+    for (const [name, tool] of this.tools) {
+      if (!RESTRICTED_TOOLS.includes(name)) {
+        filtered.set(name, tool);
+      }
+    }
+
+    return filtered;
   }
 }
 

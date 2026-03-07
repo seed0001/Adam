@@ -41,22 +41,42 @@ export const writeFileTool = tool({
     append: z.boolean().default(false).describe("Append to file instead of overwriting"),
   }),
   execute: async ({ path: filePath, content, append }) => {
-    if (!isSafePath(filePath)) {
+    const resolvedPath = resolve(filePath);
+    if (!isSafePath(resolvedPath)) {
       return { error: `Access denied: path '${filePath}' is outside allowed directories` };
     }
     try {
-      const { mkdirSync } = await import("node:fs");
+      const { mkdirSync, writeFileSync, readFileSync, existsSync } = await import("node:fs");
       const { dirname } = await import("node:path");
-      mkdirSync(dirname(filePath), { recursive: true });
 
+      const env = {
+        pid: process.pid,
+        cwd: process.cwd(),
+        resolvedPath,
+      };
+
+      mkdirSync(dirname(resolvedPath), { recursive: true });
+
+      let finalContent = content;
       if (append) {
-        const existing = await readFile(filePath, "utf8").catch(() => "");
-        await writeFile(filePath, existing + content, "utf8");
-      } else {
-        await writeFile(filePath, content, "utf8");
+        const existing = existsSync(resolvedPath) ? readFileSync(resolvedPath, "utf8") : "";
+        finalContent = existing + content;
       }
 
-      return { success: true, path: filePath };
+      writeFileSync(resolvedPath, finalContent, "utf8");
+
+      // Verification Loop
+      const readBack = readFileSync(resolvedPath, "utf8");
+      if (readBack !== finalContent) {
+        throw new Error(`Write verification failed: read content did not match written content at ${resolvedPath}`);
+      }
+
+      return {
+        success: true,
+        path: resolvedPath,
+        verified: true,
+        env
+      };
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) };
     }

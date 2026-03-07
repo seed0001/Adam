@@ -11,6 +11,8 @@ The diagnostics dashboard provides end-to-end visibility into the Adam codebase:
 | **Codebase analysis** | Scans `packages/` and `apps/`, extracts exports (function, class, const, type, interface) and imports |
 | **Pipeline registry** | Maps Agent and BuildSupervisor stages to modules and functions |
 | **Test runner** | Runs Vitest across all packages with tests, parses JSON output |
+| **Patch Service** | AI-backed diagnostic engine that analyze failures and proposes unified diffs |
+| **Reinforcement Service** | Tracks agent behavior traits, identifies emerging strengths, and curates "Golden Examples" |
 | **Dynamic tests** | User-defined tests (JSON) that can target classifier, planner, executor, build-supervisor, or custom paths |
 
 ---
@@ -27,6 +29,8 @@ Open the **Diagnostics** tab in the web dashboard (http://localhost:18800).
 | **Pipeline** | Flow diagram (classify → plan → execute → observe + BuildSupervisor stages), stage details |
 | **Pipeline Test** | Runs a fixed prompt through the agent; shows workspace, pool, Ollama status, and response |
 | **Dynamic Tests** | List of user-defined tests, JSON editor to add new tests |
+| **Patches** | The **Patch Queue**: review, approve, or reject proposed system fixes |
+| **Traits** | Agent behavior scorecard: Initiative, Resilience, Architecture, etc. |
 | **Results** | Summary (passed/failed/skipped), per-package results with individual test status |
 
 **Actions:**
@@ -48,6 +52,11 @@ Open the **Diagnostics** tab in the web dashboard (http://localhost:18800).
 | `/api/diagnostics/run` | POST | Run all Vitest tests across packages |
 | `/api/diagnostics/results` | GET | Last run results (or error if none yet) |
 | `/api/diagnostics/pipeline-test` | POST | Run a fixed test prompt through the agent (Ollama + code tools verification) |
+| `/api/patches` | GET | List all proposed code patches |
+| `/api/patches/:id/approve` | POST | Apply an approved patch using `git apply` |
+| `/api/feedback` | POST | Submit positive/negative reinforcement signals |
+| `/api/traits` | GET | View current agent trait scores |
+| `/api/golden-examples` | GET | View curated "Golden Example" interactions |
 
 ---
 
@@ -100,6 +109,8 @@ The endpoint now returns per-backend traces (`available`, `command`, `exitCode`,
 - `runAllTests(rootDir)` — Returns `DiagnosticRunResult`
 - `getDynamicTests()`, `addDynamicTest()`, `removeDynamicTest()`, `setDynamicTests()`, `clearDynamicTests()`
 - `runDynamicTest()`, `runAllDynamicTests()` — Placeholder; full execution requires daemon context
+- `PatchService` — Failure diagnosis and improvement review engine
+- `ReinforcementService` — Behavior analysis and trait reinforcement
 
 **Types:**
 - `CodebaseAnalysis` — modules, packages, totalExports, totalModules, analyzedAt

@@ -18,6 +18,10 @@ export {
   runDynamicTest,
   runAllDynamicTests,
 } from "./dynamic-test.js";
+export { PatchService } from "./patch-service.js";
+export { ReinforcementService } from "./reinforcement-service.js";
+export type { PatchProposal } from "./patch-service.js";
+export type { ReinforcementProposal } from "./reinforcement-service.js";
 export type { DynamicTestStore } from "./dynamic-test.js";
 export type {
   CodebaseAnalysis,

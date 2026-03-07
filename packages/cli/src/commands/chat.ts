@@ -51,8 +51,8 @@ export function registerChatCommand(program: Command): void {
         console.error(chalk.red("\n  ✖  Adam is not configured yet."));
         console.error(
           chalk.gray("     Run: ") +
-            chalk.white("adam init") +
-            chalk.gray(" to set up your providers.\n"),
+          chalk.white("adam init") +
+          chalk.gray(" to set up your providers.\n"),
         );
         process.exit(1);
       }
@@ -96,8 +96,8 @@ export function registerChatCommand(program: Command): void {
           );
           console.error(
             chalk.gray("\n     Run: ") +
-              chalk.white("adam init") +
-              chalk.gray(" to configure a provider.\n"),
+            chalk.white("adam init") +
+            chalk.gray(" to configure a provider.\n"),
           );
           process.exit(1);
         }
@@ -133,15 +133,26 @@ export function registerChatCommand(program: Command): void {
           ["shell", shellTool],
         ]);
 
-        // Code tools — cloud model plans, local coder model implements
+        // Code tools — cloud model plans, cloud expert implements
         const workspace = config.daemon.workspace ?? homedir();
         const codeTools = createCodeTools(router, generateSessionId(), workspace);
         for (const [name, t] of codeTools) tools.set(name, t);
 
-        agent = new Agent(router, queue, episodic, tools, {
-          systemPrompt: buildSystemPrompt(config),
-          name: config.daemon.agentName,
-        }, profile, personality, scratchpad, skillStore);
+        agent = new Agent(
+          router,
+          queue,
+          episodic,
+          tools,
+          {
+            systemPrompt: buildSystemPrompt(config),
+            name: config.daemon.agentName,
+          },
+          null, // sessions
+          profile,
+          personality,
+          scratchpad,
+          skillStore
+        );
 
         // Stochastic memory consolidator — runs in the background during CLI sessions too
         consolidator = new MemoryConsolidator(profile, episodic, router, {
@@ -163,10 +174,10 @@ export function registerChatCommand(program: Command): void {
           : "";
         initSpinner.succeed(
           chalk.green("Ready") +
-            chalk.gray("  ·  ") +
-            chalk.gray(describePool(poolConfig)) +
-            memoryNote +
-            personalityNote,
+          chalk.gray("  ·  ") +
+          chalk.gray(describePool(poolConfig)) +
+          memoryNote +
+          personalityNote,
         );
       } catch (e: unknown) {
         initSpinner.fail(
@@ -772,13 +783,13 @@ Tools you have right now — use them:
 - list_directory: list files and folders at any path
 - shell: run any shell command on this machine
 
-Code tools — your division of labor with a local code model:
+Code tools — your experts in implementation:
 You are the senior engineer / tech lead. You decide WHAT to build and WHY. You never write raw implementation code yourself.
-The local code model is the fast, tireless junior — it implements exactly what you specify and returns diffs and outputs for your review.
-- code_write_file: describe what a file should do → local coder writes it
-- code_edit_file: describe the change to make → local coder edits the file, returns diff
-- code_scaffold: specify a project structure → local coder generates all files
-- code_review: ask a specific question about a file → local coder answers it
+The implementation is handled by an expert code analyst developer — it implements exactly what you specify and returns diffs and outputs for your review.
+- code_write_file: describe what a file should do → expert coder writes it
+- code_edit_file: describe the change to make → expert coder edits the file, returns diff
+- code_scaffold: specify a project structure → expert coder generates all files
+- code_review: ask a specific question about a file → expert coder answers it
 When building software: use code_scaffold or code_write_file to create files, shell to run commands, code_review to verify correctness.
 Never write code yourself in the response when you can use these tools to have it implemented directly.
 

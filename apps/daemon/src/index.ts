@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ADAM_HOME_DIR,
   ADAM_VERSION,
+  PORTS,
   loadConfig,
   saveConfig,
   addLogHandler,
@@ -18,15 +20,24 @@ import {
   type InboundMessage,
 } from "@adam/shared";
 import { vault, PermissionRegistry, AuditLog } from "@adam/security";
-import { getDatabase, getRawDatabase, EpisodicStore, ProfileStore } from "@adam/memory";
+import { getDatabase, getRawDatabase, EpisodicStore, ProfileStore, SessionStore, PatchStore, FeedbackStore } from "@adam/memory";
 import {
   ProviderRegistry,
   ModelRouter,
   type ModelPoolConfig,
   type ProviderConfig,
 } from "@adam/models";
-import { Agent, TaskQueue, PersonalityStore, MemoryConsolidator, ScratchpadStore } from "@adam/core";
-import { SkillStore } from "@adam/skills";
+import {
+  Agent,
+  TaskQueue,
+  PersonalityStore,
+  MemoryConsolidator,
+  ScratchpadStore,
+  JobRegistry,
+  agentEventBus,
+} from "@adam/core";
+import { SkillStore, type SkillSpec } from "@adam/skills";
+import { VoiceRegistry, VoiceOrchestrator } from "@adam/voice";
 import { tool } from "ai";
 import { z } from "zod";
 import {
@@ -43,10 +54,28 @@ import {
   shellTool,
   createCodeTools,
 } from "@adam/skills";
+import { buildModelPool as buildPool } from "./model-pool.js";
 import { BrowserSession } from "./browser.js";
+import { generateChatBackground } from "./image-generator.js";
+import { runWithSession, getSessionId } from "./session-context.js";
+import {
+  analyzeCodebase,
+  PIPELINE_REGISTRY,
+  runAllTests,
+  getDynamicTests,
+  addDynamicTest,
+  removeDynamicTest,
+  setDynamicTests,
+  PatchService,
+  ReinforcementService,
+} from "@adam/diagnostics";
 import type { CoreTool } from "ai";
+import type Database from "better-sqlite3";
 
 const logger = createLogger("daemon");
+
+// Last diagnostic run result — in-memory cache for GET /api/diagnostics/results
+let lastDiagnosticResult: Awaited<ReturnType<typeof runAllTests>> | null = null;
 
 // Single browser session — lazy-started on first tool call, reused for the daemon's lifetime.
 // Headed (visible) so the user can watch Adam navigate in real time.
@@ -73,8 +102,155 @@ type ApiContext = {
   scratchpad: ScratchpadStore;
   skills: SkillStore;
   consolidator: MemoryConsolidator;
-  tools: Map<string, CoreTool<any, any>>;
+  voiceRegistry: VoiceRegistry;
+  voiceOrchestrator: VoiceOrchestrator;
+  chatBackgroundStore: Map<string, string>;
+  jobRegistry: JobRegistry;
+  roles: RoleRegistry;
+  patchStore: PatchStore;
+  patchService: PatchService;
+  feedbackStore: FeedbackStore;
+  reinforcementService: ReinforcementService;
+  workspace: string;
 };
+
+type UserRole = "administrator" | "user";
+
+class RoleRegistry {
+  constructor(private db: Database.Database) {
+    this.migrate();
+  }
+
+  private migrate(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS user_roles (
+        user_id    TEXT PRIMARY KEY,
+        role       TEXT NOT NULL CHECK(role IN ('administrator', 'user')),
+        updated_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  hasAnyAdmin(): boolean {
+    const row = this.db.prepare("SELECT 1 FROM user_roles WHERE role = 'administrator' LIMIT 1").get();
+    return !!row;
+  }
+
+  getRole(userId: string): UserRole {
+    const row = this.db.prepare("SELECT role FROM user_roles WHERE user_id = ?").get(userId) as { role?: string } | undefined;
+    if (row?.role === "administrator" || row?.role === "user") return row.role;
+    return "user";
+  }
+
+  setRole(userId: string, role: UserRole): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO user_roles (user_id, role, updated_at) VALUES (?, ?, ?)")
+      .run(userId, role, new Date().toISOString());
+  }
+
+  list(): Array<{ userId: string; role: UserRole; updatedAt: string }> {
+    const rows = this.db
+      .prepare("SELECT user_id, role, updated_at FROM user_roles ORDER BY updated_at DESC")
+      .all() as Array<{ user_id: string; role: UserRole; updated_at: string }>;
+    return rows.map((r) => ({ userId: r.user_id, role: r.role, updatedAt: r.updated_at }));
+  }
+}
+
+class ReviewLoop {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private running = false;
+  private sessionId: string;
+
+  constructor(
+    private episodic: EpisodicStore,
+    private patchService: PatchService,
+    private reinforcementService: ReinforcementService,
+    private patchStore: PatchStore,
+    private feedbackStore: FeedbackStore,
+    private workspace: string,
+    private options: {
+      minIntervalMs?: number; // default 4 hours
+      maxIntervalMs?: number; // default 12 hours
+    } = {},
+  ) {
+    this.sessionId = `review-loop-${Date.now()}`;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    logger.info("Review loop started (stochastic proactive improvement scan)");
+    this.scheduleNextTick();
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    logger.info("Review loop stopped");
+  }
+
+  private scheduleNextTick(): void {
+    if (!this.running) return;
+    const min = this.options.minIntervalMs ?? 4 * 60 * 60 * 1000;
+    const max = this.options.maxIntervalMs ?? 12 * 60 * 60 * 1000;
+    const delay = min + Math.random() * (max - min);
+    this.timer = setTimeout(() => {
+      void this.tick().finally(() => this.scheduleNextTick());
+    }, delay);
+  }
+
+  private async tick(): Promise<void> {
+    try {
+      logger.info("Review cycle starting");
+      // Get recent conversation context across sessions
+      const recent = this.episodic.getRecentAcrossSessions(50, 7);
+      const history = recent.map(e => `${e.role}: ${e.content}`).join("\n");
+
+      // 1. Proactive Code Review
+      const analysis = analyzeCodebase(this.workspace);
+      const result = await this.patchService.runReviewCycle(this.sessionId, history, analysis);
+
+      if (result.isOk()) {
+        for (const proposal of result.value) {
+          this.patchStore.create({
+            source: "review",
+            taskId: null,
+            filePath: proposal.patch.filePath,
+            diff: proposal.patch.diff,
+            rationale: proposal.rationale,
+          });
+          logger.info("New proactive improvement patch proposed", { file: proposal.patch.filePath });
+        }
+      }
+
+      // 2. Behavior Reinforcement Analysis
+      const currentTraits = this.feedbackStore.listTraits().map((t: any) => ({ name: t.name, score: t.score }));
+      const reinforcementResult = await this.reinforcementService.analyzeBehavior(this.sessionId, history, currentTraits);
+
+      if (reinforcementResult.isOk()) {
+        for (const proposal of reinforcementResult.value) {
+          if (proposal.type === "behavior_replication" && proposal.actionablePatch) {
+            this.patchStore.create({
+              source: "review",
+              taskId: null,
+              filePath: proposal.actionablePatch.patch.filePath,
+              diff: proposal.actionablePatch.patch.diff,
+              rationale: proposal.rationale,
+            });
+            logger.info("New behavior replication patch proposed", { file: proposal.actionablePatch.patch.filePath });
+          }
+          logger.info(`Behavior reinforcement signal: ${proposal.type}`, { trait: proposal.trait, rationale: proposal.rationale });
+        }
+      }
+
+    } catch (e) {
+      logger.error("Review cycle failed", { error: String(e) });
+    }
+  }
+}
 
 type AdapterBundle = { adapters: BaseAdapter[]; discordAdapter: DiscordAdapter | null };
 
@@ -96,15 +272,26 @@ async function main() {
   const rawDb = getRawDatabase(dataDir);
   const drizzleDb = getDatabase(dataDir);
 
+  const voiceRegistry = new VoiceRegistry(rawDb);
+  const voiceOrchestrator = new VoiceOrchestrator();
+
   const auditLog = new AuditLog(rawDb);
   const permissions = new PermissionRegistry(rawDb);
   void permissions;
+  const roles = new RoleRegistry(rawDb);
+  if (!roles.hasAnyAdmin()) {
+    roles.setRole("local-user", "administrator");
+    logger.info("RBAC bootstrap: assigned local-user as administrator");
+  }
 
   const episodic = new EpisodicStore(drizzleDb);
+  const sessions = new SessionStore(drizzleDb);
   const profile = new ProfileStore(drizzleDb);
   const personality = new PersonalityStore(config.daemon.agentName);
   const scratchpad = new ScratchpadStore();
   const skills = new SkillStore();
+  const patchStore = new PatchStore(drizzleDb);
+  const feedbackStore = new FeedbackStore(drizzleDb);
 
   const poolConfig = await buildModelPool(config);
   if (poolConfig.fast.length === 0 && poolConfig.capable.length === 0) {
@@ -132,6 +319,15 @@ async function main() {
   });
 
   const queue = new TaskQueue(rawDb);
+  const jobRegistry = new JobRegistry(rawDb);
+  const diagRouter = {
+    generate: async (opts: any) => {
+      const result = await router.generate(opts);
+      return result;
+    },
+  };
+  const patchService = new PatchService(diagRouter);
+  const reinforcementService = new ReinforcementService(diagRouter);
 
   // Build adapters first so we can create Discord tools with a live adapter reference
   const { adapters, discordAdapter } = await buildAdapters(config);
@@ -153,8 +349,7 @@ async function main() {
           "List every Discord guild and text channel the bot is connected to. " +
           "Call this first to find channel IDs before posting a message.",
         parameters: z.object({}),
-        // eslint-disable-next-line @typescript-eslint/require-await
-        execute: async () => ({ guilds: discordAdapter?.listChannels() || [] }),
+        execute: async () => ({ guilds: discordAdapter.listChannels() }),
       }),
     );
 
@@ -397,99 +592,250 @@ async function main() {
     }),
   );
 
-  tools.set(
-    "publish_to_suno",
-    tool({
-      description: "Publish a song to Suno using Custom Mode (lyrics, style, title).",
-      parameters: z.object({
-        lyrics: z.string().describe("The full lyrics of the song"),
-        style: z.string().describe("The musical style (e.g. 'heavy metal', 'ambient synth')"),
-        title: z.string().describe("The title of the song"),
+  // Suno tool removed because suno.ts is missing from the source.
+
+  logger.info("Browser tools registered (browser_navigate, browser_click, browser_type, browser_content, browser_screenshot, browser_scroll, browser_back, browser_new_tab, browser_close)");
+
+  // ── Chat background (image generation) ─────────────────────────────────────
+  const chatBackgroundStore = new Map<string, string>();
+  const hasImageProvider = config.providers.xai?.enabled || config.providers.openai?.enabled;
+  if (hasImageProvider) {
+    tools.set(
+      "generate_chat_background",
+      tool({
+        description:
+          "Generate a new background image for the web chat UI. Use when the user asks to change the chat background, set a mood, or create a visual atmosphere. " +
+          "The image becomes the backdrop for the chat — atmospheric, ambient scenes work best (e.g. 'cozy rainy café', 'sunset over mountains', 'abstract gradient'). " +
+          "You are responsible for the chat's visual environment. Call this when the user wants a new background.",
+        parameters: z.object({
+          prompt: z
+            .string()
+            .min(3)
+            .max(500)
+            .describe("Image generation prompt (e.g. 'serene Japanese garden at dusk, soft lighting')"),
+        }),
+        execute: async ({ prompt }) => {
+          const sessionId = getSessionId();
+          if (!sessionId) return { success: false, error: "No session context" };
+
+          const getApiKey = async (provider: string) => {
+            const r = await vault.get(`provider:${provider}:api-key`);
+            return r.isOk() && r.value ? r.value : null;
+          };
+
+          const result = await generateChatBackground(prompt, config, getApiKey);
+          if ("error" in result) return { success: false, error: result.error };
+
+          chatBackgroundStore.set(sessionId, result.base64);
+          return { success: true, message: "Background updated. The chat UI will show the new image." };
+        },
       }),
-      execute: async ({ lyrics, style, title }) => {
-        logger.info("publish_to_suno invoked");
-        const page = await browserSession.getPage();
+    );
+    logger.info("Chat background tool registered (generate_chat_background)");
+  }
 
-        logger.info("Navigating to https://suno.com/create");
-        await page.goto("https://suno.com/create", { waitUntil: "domcontentloaded", timeout: 30000 });
-
-        // Click "Custom" mode if not already active
-        try {
-          logger.info("Enabling Custom Mode");
-          await page.click('button:has-text("Custom")', { timeout: 5000 });
-        } catch {
-          logger.warn("Could not find 'Custom' button, assuming it might be already active or UI changed");
+  // ── Build job tools (Phase 3: agent integration) ─────────────────────────────
+  tools.set(
+    "spawn_build_job",
+    tool({
+      description:
+        "Start a background build job. Use when the user wants to update the codebase, add a feature, fix something, or run a supervised engineering pipeline. " +
+        "The job runs in a separate process: checkout, install deps, analyze (LLM plans), patch (LLM applies), build, test. " +
+        "Returns immediately with jobId. Use get_build_job_status or cancel_build_job to check or stop.",
+      parameters: z.object({
+        goal: z.string().describe("What to do (e.g. 'Add a hello function to src/index.ts', 'Fix the type error in registry.ts')"),
+        branch: z.string().default("main").describe("Git branch to use"),
+        repoPath: z.string().optional().describe("Repo path (default: workspace)"),
+      }),
+      execute: async ({ goal, branch, repoPath }) => {
+        const repo = repoPath?.trim() ?? workspace;
+        const result = jobRegistry.create(branch, true, goal);
+        if (result.isErr()) return { success: false, error: result.error.message };
+        const jobId = result.value;
+        const __dir = dirname(fileURLToPath(import.meta.url));
+        const workerPath = join(__dir, "build-supervisor-worker.js");
+        if (existsSync(workerPath)) {
+          const child = spawn(process.execPath, [workerPath, jobId], {
+            cwd: repo,
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env },
+          });
+          child.on("error", (e) => logger.error("BuildSupervisor worker error", { error: e.message }));
+          child.on("exit", (code, signal) => {
+            if (code !== 0 && code !== null) logger.warn("BuildSupervisor worker exited", { jobId, code, signal });
+          });
+        } else {
+          return { success: false, error: "BuildSupervisor worker not found" };
         }
+        return { success: true, jobId, message: `Job ${jobId} started. Use get_build_job_status to check progress.` };
+      },
+    }),
+  );
 
-        logger.info("Filling lyrics, style, and title");
-        try {
-          await page.fill('textarea[placeholder="Enter your lyrics"]', lyrics, { timeout: 10000 });
-          await page.fill('textarea[placeholder="Enter style of music"]', style);
-          await page.fill('input[placeholder="Enter a title"]', title);
-        } catch (e) {
-          logger.error("Failed to fill Suno fields", { error: String(e) });
-          // Fallback to generic textareas if placeholders fail
-          const textareas = await page.$$('textarea');
-          if (textareas.length >= 2) {
-            const lArea = textareas[0];
-            const sArea = textareas[1];
-            if (lArea) await lArea.fill(lyrics);
-            if (sArea) await sArea.fill(style);
-          }
-        }
-
-        logger.info("Clicking Create");
-        try {
-          await page.click('button:has-text("Create")', { timeout: 5000 });
-        } catch {
-          await page.click('button[type="submit"]');
-        }
-
+  tools.set(
+    "get_build_job_status",
+    tool({
+      description:
+        "Get status of a build job. Use when the user asks 'what's going on?', 'status?', 'how's the build?', or to check progress. " +
+        "Pass jobId from spawn_build_job, or omit to get the active job.",
+      parameters: z.object({
+        jobId: z.string().optional().describe("Job ID (omit to get active job)"),
+      }),
+      execute: async ({ jobId }) => {
+        const job = jobId ? jobRegistry.get(jobId) : jobRegistry.getActiveJobForRepo(workspace);
+        if (!job) return { found: false, message: jobId ? "Job not found" : "No active job" };
+        const events = jobRegistry.getEvents(job.id);
+        const summary = events
+          .filter((e) => e.type === "STAGE_END" || e.type === "ERROR_DETECTED" || e.type === "PATCH_APPLIED")
+          .slice(-5)
+          .map((e) => {
+            if (e.type === "STAGE_END") return `[${e.stage}] ${e.durationMs}ms`;
+            if (e.type === "ERROR_DETECTED") return `[error] ${e.summary}`;
+            if (e.type === "PATCH_APPLIED") return `[patch] ${e.files?.join(", ") ?? e.summary}`;
+            return "";
+          })
+          .filter(Boolean)
+          .join("; ");
         return {
-          success: true,
-          message: `Song '${title}' is being generated with your custom lyrics.`,
+          found: true,
+          jobId: job.id,
+          status: job.status,
+          currentStage: job.currentStage,
+          branch: job.branch,
+          goal: job.goal,
+          recentSummary: summary || "No events yet",
         };
       },
     }),
   );
 
-  logger.info("Browser tools registered (browser_navigate, browser_click, browser_type, browser_content, browser_screenshot, browser_scroll, browser_back, browser_new_tab, browser_close, create_suno_song)");
+  tools.set(
+    "cancel_build_job",
+    tool({
+      description: "Request cancellation of a build job. Use when the user says 'cancel', 'stop', 'abort'.",
+      parameters: z.object({
+        jobId: z.string().describe("Job ID to cancel"),
+      }),
+      execute: async ({ jobId }) => {
+        const result = jobRegistry.requestCancel(jobId);
+        if (result.isErr()) return { success: false, error: result.error.message };
+        return { success: true, message: `Cancellation requested for ${jobId}` };
+      },
+    }),
+  );
+
+  tools.set(
+    "summarize_build_job",
+    tool({
+      description:
+        "Get a narrative summary of a build job: status, stages completed, errors, and key events. " +
+        "Use when the user wants a readable summary of what happened.",
+      parameters: z.object({
+        jobId: z.string().describe("Job ID to summarize"),
+      }),
+      execute: async ({ jobId }) => {
+        const job = jobRegistry.get(jobId);
+        if (!job) return { found: false, summary: "Job not found" };
+        const events = jobRegistry.getEvents(jobId);
+        const lines: string[] = [
+          `Job ${jobId}: ${job.status}`,
+          `Branch: ${job.branch}${job.goal ? ` | Goal: ${job.goal}` : ""}`,
+          `Current stage: ${job.currentStage ?? "—"}`,
+        ];
+        const keyEvents = events.filter(
+          (e) =>
+            e.type === "STAGE_START" ||
+            e.type === "STAGE_END" ||
+            e.type === "ERROR_DETECTED" ||
+            e.type === "PATCH_APPLIED" ||
+            e.type === "JOB_COMPLETED" ||
+            e.type === "JOB_FAILED" ||
+            e.type === "JOB_CANCELLED",
+        );
+        for (const e of keyEvents.slice(-15)) {
+          if (e.type === "STAGE_START") lines.push(`  → ${e.stage}`);
+          else if (e.type === "STAGE_END") lines.push(`  ✓ ${e.stage} (${e.durationMs}ms)`);
+          else if (e.type === "ERROR_DETECTED") lines.push(`  ✗ ${e.summary}${e.file ? ` (${e.file})` : ""}`);
+          else if (e.type === "PATCH_APPLIED") lines.push(`  📝 ${e.files?.join(", ") ?? e.summary}`);
+          else if (e.type === "JOB_COMPLETED") lines.push(`  Done: ${e.success ? "success" : "failed"}`);
+          else if (e.type === "JOB_FAILED") lines.push(`  Failed: ${e.reason}`);
+          else if (e.type === "JOB_CANCELLED") lines.push("  Cancelled");
+        }
+        return { found: true, summary: lines.join("\n") };
+      },
+    }),
+  );
+
+  logger.info("Build job tools registered (spawn_build_job, get_build_job_status, cancel_build_job, summarize_build_job)");
+
+  const defaultVoice =
+    config.voice?.enabled ? voiceRegistry.getDefault() : null;
 
   const agent = new Agent(
     router,
     queue,
     episodic,
     tools,
-    { systemPrompt: buildSystemPrompt(config), name: config.daemon.agentName },
+    {
+      systemPrompt: buildSystemPrompt(config),
+      name: config.daemon.agentName,
+      defaultVoiceId: defaultVoice?.id ?? null,
+    },
+    sessions,
     profile,
     personality,
     scratchpad,
     skills,
+    patchStore,
+    patchService,
   );
 
   for (const adapter of adapters) {
-    adapter.on("message", (message) => {
-      void agent.process(message).then(async (result) => {
-        if (result.isOk()) {
-          await adapter.send(result.value);
-        } else {
-          logger.error("Agent processing failed", { error: result.error.message });
-          await adapter.send({
-            sessionId: message.sessionId,
-            channelId: message.channelId,
-            source: message.source,
-            content: `Error: ${result.error.message}`,
-            voiceProfileId: null,
-            replyToId: message.id,
-            metadata: {},
-          });
+    adapter.on("message", async (message) => {
+      const result = await runWithSession(message.sessionId, () => agent.process(message));
+      let outbound = result.isOk()
+        ? result.value
+        : {
+          sessionId: message.sessionId,
+          channelId: message.channelId,
+          source: message.source,
+          content: `Error: ${result.error.message}`,
+          voiceProfileId: null as string | null,
+          replyToId: message.id,
+          metadata: {} as Record<string, unknown>,
+        };
+      if (!result.isOk()) {
+        logger.error("Agent processing failed", { error: result.error.message });
+      }
+
+      // Synthesize voice when enabled and a profile is set
+      if (
+        outbound.voiceProfileId &&
+        config.voice?.enabled &&
+        outbound.content
+      ) {
+        const profile = voiceRegistry.get(outbound.voiceProfileId);
+        if (profile) {
+          const { tmpdir } = await import("node:os");
+          const outputPath = join(tmpdir(), `adam-tts-${Date.now()}.mp3`);
+          const synth = await voiceOrchestrator.synthesize(
+            outbound.content,
+            profile,
+            outputPath,
+          );
+          if (synth.isOk()) {
+            outbound = {
+              ...outbound,
+              metadata: { ...outbound.metadata, audioPath: outputPath },
+            };
+          }
         }
-      });
+      }
+
+      await adapter.send(outbound);
     });
   }
 
-  // Start the stochastic memory consolidator — decays unused facts, extracts
-  // durable knowledge from old episodes. No global clock; fires at random intervals.
   const consolidator = new MemoryConsolidator(profile, episodic, router, {
     decayHalfLifeDays: config.memory.decayHalfLifeDays,
     decayMinConfidence: config.memory.decayMinConfidence,
@@ -497,7 +843,31 @@ async function main() {
   });
   consolidator.start();
 
-  const ctx: ApiContext = { config, agent, router, profile, episodic, discordAdapter, personality, scratchpad, skills, consolidator, tools };
+  const reviewLoop = new ReviewLoop(episodic, patchService, reinforcementService, patchStore, feedbackStore, workspace);
+  reviewLoop.start();
+
+  const ctx: ApiContext = {
+    config,
+    agent,
+    router,
+    profile,
+    episodic,
+    discordAdapter,
+    personality,
+    scratchpad,
+    skills,
+    consolidator,
+    voiceRegistry,
+    voiceOrchestrator,
+    chatBackgroundStore,
+    jobRegistry,
+    roles,
+    patchStore,
+    patchService,
+    feedbackStore,
+    reinforcementService,
+    workspace,
+  };
   const server = createApiServer(ctx);
   server.listen(config.daemon.port, "127.0.0.1", () => {
     logger.info(`API server on http://localhost:${config.daemon.port}`);
@@ -516,6 +886,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down`);
     consolidator.stop();
+    reviewLoop.stop();
     for (const adapter of adapters) await adapter.stop().catch(() => { });
     await browserSession.close().catch(() => { });
     server.close();
@@ -545,12 +916,19 @@ const MIME: Record<string, string> = {
 
 function findWebRoot(): string | null {
   const __dir = dirname(fileURLToPath(import.meta.url));
-  // npm install: web files shipped alongside daemon
-  const bundled = join(__dir, "..", "web");
-  if (existsSync(join(bundled, "index.html"))) return bundled;
   // monorepo dev: apps/daemon/dist/../../web/dist → apps/web/dist
   const mono = join(__dir, "..", "..", "web", "dist");
-  if (existsSync(join(mono, "index.html"))) return mono;
+  if (existsSync(join(mono, "index.html"))) {
+    logger.info(`Serving web UI from monorepo path: ${mono}`);
+    return mono;
+  }
+  // npm install: web files shipped alongside daemon
+  const bundled = join(__dir, "..", "web");
+  if (existsSync(join(bundled, "index.html"))) {
+    logger.info(`Serving web UI from bundled path: ${bundled}`);
+    return bundled;
+  }
+  logger.warn("Web UI not found");
   return null;
 }
 
@@ -569,7 +947,12 @@ function serveStatic(res: ServerResponse, urlPath: string): void {
     if (!existsSync(p)) return false;
     const ext = extname(p);
     const mime = MIME[ext] ?? "application/octet-stream";
-    res.writeHead(200, { "Content-Type": mime });
+    res.writeHead(200, {
+      "Content-Type": mime,
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
+    });
     res.end(readFileSync(p));
     return true;
   };
@@ -603,10 +986,111 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
+function findTriggeredActiveSkill(skills: SkillSpec[], message: string): SkillSpec | null {
+  const lower = message.toLowerCase();
+  const words = new Set(lower.match(/[a-z0-9]+/g) ?? []);
+  const stop = new Set(["the", "a", "an", "to", "for", "and", "or", "is", "it", "we", "you", "i", "of", "this", "that"]);
+  let best: { skill: SkillSpec; score: number } | null = null;
+  for (const s of skills) {
+    if (s.status !== "active") continue;
+    if (
+      s.name.includes("clarify") &&
+      (lower.includes("did not ask") || lower.includes("didn't ask") || lower.includes("we did not discuss") || lower.includes("we didn't discuss"))
+    ) {
+      return s;
+    }
+    for (const trigger of s.triggers) {
+      const t = trigger.trim().toLowerCase();
+      if (!t) continue;
+      if (lower.includes(t)) {
+        const score = t.length + 1000;
+        if (!best || score > best.score) best = { skill: s, score };
+        continue;
+      }
+      const triggerWords = (t.match(/[a-z0-9]+/g) ?? []).filter((w) => !stop.has(w));
+      if (triggerWords.length === 0) continue;
+      let matched = 0;
+      for (const tw of triggerWords) {
+        if (words.has(tw)) matched += 1;
+      }
+      const ratio = matched / triggerWords.length;
+      if (matched >= 2 && ratio >= 0.5) {
+        const score = Math.floor(ratio * 100) + matched;
+        if (!best || score > best.score) best = { skill: s, score };
+      }
+    }
+  }
+  return best?.skill ?? null;
+}
+
+async function executeActiveSkill(
+  ctx: ApiContext,
+  skill: SkillSpec,
+  userMessage: string,
+  sessionId: string,
+): Promise<{ response: string; metadata: Record<string, unknown> }> {
+  // First executable template: constrained conversational skill runner.
+  if (skill.template === "llm-response") {
+    const system = [
+      "You are executing an ACTIVE skill contract.",
+      "Follow the skill constraints strictly.",
+      "Do not claim actions you did not perform.",
+      "Respond concisely to the user request.",
+      "",
+      `Skill: ${skill.displayName} (${skill.id})`,
+      `Description: ${skill.description}`,
+      `Steps:`,
+      ...skill.steps.map((s, i) => `${i + 1}. ${s}`),
+      `Constraints:`,
+      ...skill.constraints.map((c) => `- ${c}`),
+    ].join("\n");
+
+    const out = await ctx.router.generate({
+      sessionId,
+      tier: "capable",
+      system,
+      prompt: `User message: ${userMessage}`,
+    });
+    if (out.isErr()) {
+      return {
+        response:
+          `Skill matched but execution failed: ${out.error.message}\n\n` +
+          `**Skill Execution**\n` +
+          `- id: ${skill.id}\n` +
+          `- status: ${skill.status}\n` +
+          `- template: ${skill.template}\n` +
+          `- source: skill-store`,
+        metadata: { skillExecution: true, skillId: skill.id, skillTemplate: skill.template, success: false },
+      };
+    }
+    return {
+      response:
+        `${out.value}\n\n` +
+        `**Skill Execution**\n` +
+        `- id: ${skill.id}\n` +
+        `- status: ${skill.status}\n` +
+        `- template: ${skill.template}\n` +
+        `- source: skill-store`,
+      metadata: { skillExecution: true, skillId: skill.id, skillTemplate: skill.template, success: true },
+    };
+  }
+
+  return {
+    response:
+      `I matched active skill \`${skill.id}\` but its template \`${skill.template}\` is not runnable in chat yet.\n\n` +
+      `**Skill Execution**\n` +
+      `- id: ${skill.id}\n` +
+      `- status: ${skill.status}\n` +
+      `- template: ${skill.template}\n` +
+      `- source: skill-store`,
+    metadata: { skillExecution: true, skillId: skill.id, skillTemplate: skill.template, success: false },
+  };
+}
+
 function createApiServer(ctx: ApiContext) {
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
+  return createServer(async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
     if (req.method === "OPTIONS") {
@@ -617,583 +1101,1697 @@ function createApiServer(ctx: ApiContext) {
 
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname;
+    const requestUserId = req.headers["x-adam-user-id"]?.toString().trim() || "local-user";
+    const requestRole = ctx.roles.getRole(requestUserId);
+    const requireAdmin = (): boolean => {
+      if (requestRole === "administrator") return true;
+      json(res, 403, {
+        error: "administrator role required",
+        userId: requestUserId,
+        role: requestRole,
+      });
+      return false;
+    };
 
-    void (async () => {
-      try {
-        // ── GET /health ────────────────────────────────────────────────────────
-        if (path === "/health" && req.method === "GET") {
-          return json(res, 200, {
-            status: "ok",
-            version: ADAM_VERSION,
-            uptime: Math.floor(process.uptime()),
-            agentName: ctx.config.daemon.agentName,
-            profileFacts: ctx.profile.getAll().length,
-          });
+    try {
+      // ── GET /health ────────────────────────────────────────────────────────
+      if (path === "/health" && req.method === "GET") {
+        return json(res, 200, {
+          status: "ok",
+          version: ADAM_VERSION,
+          uptime: Math.floor(process.uptime()),
+          agentName: ctx.config.daemon.agentName,
+          profileFacts: ctx.profile.getAll().length,
+        });
+      }
+
+      // ── RBAC endpoints ─────────────────────────────────────────────────────
+      if (path === "/api/access/me" && req.method === "GET") {
+        return json(res, 200, { userId: requestUserId, role: requestRole });
+      }
+      if (path === "/api/access/roles" && req.method === "GET") {
+        if (!requireAdmin()) return;
+        return json(res, 200, { roles: ctx.roles.list() });
+      }
+      if (path === "/api/access/roles" && req.method === "POST") {
+        const body = (await readBody(req)) as { userId?: string; role?: UserRole };
+        if (!body.userId || !body.role || !["administrator", "user"].includes(body.role)) {
+          return json(res, 400, { error: "userId and role (administrator|user) are required" });
+        }
+        // Bootstrap escape hatch: if there are no admins yet, allow first assignment.
+        if (ctx.roles.hasAnyAdmin() && !requireAdmin()) return;
+        ctx.roles.setRole(body.userId, body.role);
+        return json(res, 200, { ok: true, userId: body.userId, role: ctx.roles.getRole(body.userId) });
+      }
+
+      // ── GET /api/diagnostics/analysis ─────────────────────────────────────
+      if (path === "/api/diagnostics/analysis" && req.method === "GET") {
+        const __dir = dirname(fileURLToPath(import.meta.url));
+        const adamRoot = join(__dir, "..", "..", "..");
+        const analysis = analyzeCodebase(adamRoot);
+        return json(res, 200, analysis);
+      }
+
+      // ── GET /api/diagnostics/pipeline ──────────────────────────────────────
+      if (path === "/api/diagnostics/pipeline" && req.method === "GET") {
+        return json(res, 200, PIPELINE_REGISTRY);
+      }
+
+      // ── GET /api/diagnostics/tests ─────────────────────────────────────────
+      if (path === "/api/diagnostics/tests" && req.method === "GET") {
+        return json(res, 200, { tests: getDynamicTests() });
+      }
+
+      // ── POST /api/diagnostics/tests ───────────────────────────────────────
+      if (path === "/api/diagnostics/tests" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as { tests?: unknown[]; test?: unknown };
+        if (body.tests && Array.isArray(body.tests)) {
+          setDynamicTests(body.tests as Parameters<typeof setDynamicTests>[0]);
+        } else if (body.test && typeof body.test === "object") {
+          addDynamicTest(body.test as Parameters<typeof addDynamicTest>[0]);
+        }
+        return json(res, 200, { tests: getDynamicTests() });
+      }
+
+      // ── DELETE /api/diagnostics/tests/:id ──────────────────────────────────
+      if (path.startsWith("/api/diagnostics/tests/") && req.method === "DELETE") {
+        if (!requireAdmin()) return;
+        const id = decodeURIComponent(path.slice("/api/diagnostics/tests/".length));
+        removeDynamicTest(id);
+        return json(res, 200, { tests: getDynamicTests() });
+      }
+
+      // ── POST /api/diagnostics/run ──────────────────────────────────────────
+      if (path === "/api/diagnostics/run" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const __dir = dirname(fileURLToPath(import.meta.url));
+        const adamRoot = join(__dir, "..", "..", "..");
+        lastDiagnosticResult = runAllTests(adamRoot);
+        return json(res, 200, lastDiagnosticResult);
+      }
+
+      // ── GET /api/diagnostics/results ───────────────────────────────────────
+      if (path === "/api/diagnostics/results" && req.method === "GET") {
+        return json(res, 200, lastDiagnosticResult ?? { error: "No diagnostic run yet" });
+      }
+
+      // ── GET /api/patches ───────────────────────────────────────────────────
+      if (path === "/api/patches" && req.method === "GET") {
+        const proposed = ctx.patchStore.listProposed();
+        return json(res, 200, { patches: proposed });
+      }
+
+      // ── POST /api/patches/:id/approve ──────────────────────────────────────
+      if (path.startsWith("/api/patches/") && path.endsWith("/approve") && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const id = path.split("/")[3];
+        if (!id) return json(res, 400, { error: "Patch ID is required" });
+        const patch = ctx.patchStore.get(id);
+        if (!patch) return json(res, 404, { error: "Patch not found" });
+
+        // Apply the patch using the 'patch' command or similar
+        const absolutePath = join(ctx.workspace, patch.filePath);
+        if (!existsSync(absolutePath)) return json(res, 404, { error: `File not found: ${patch.filePath}` });
+
+        logger.info(`Applying approved patch to ${patch.filePath}`, { id });
+
+        // Write diff to temp file
+        const diffPath = join(homedir(), ADAM_HOME_DIR, ".tmp", `patch-${id}.diff`);
+        const { writeFileSync, mkdirSync } = await import("node:fs");
+        if (!existsSync(dirname(diffPath))) mkdirSync(dirname(diffPath), { recursive: true });
+        writeFileSync(diffPath, patch.diff);
+
+        // Run git apply command
+        const { spawnSync } = await import("node:child_process");
+        const patchCmd = spawnSync("git", ["apply", "--ignore-whitespace", diffPath], { cwd: ctx.workspace });
+
+        if (patchCmd.status !== 0) {
+          logger.error("Failed to apply patch via git", { id, stderr: patchCmd.stderr.toString() });
+          return json(res, 500, { error: "Failed to apply patch via 'git apply'. Make sure the diff is valid for this file version.", details: patchCmd.stderr.toString() });
         }
 
-        // ── GET /api/status ────────────────────────────────────────────────────
-        if (path === "/api/status" && req.method === "GET") {
-          const facts = ctx.profile.getAll();
+        ctx.patchStore.updateStatus(id, "applied");
+        return json(res, 200, { ok: true, message: "Patch applied successfully" });
+      }
 
-          // Derive active provider lists from the actual loaded pool —
-          // these are vault-verified at startup/reload, not just config flags.
-          const pool = ctx.router.getPool();
-          const toLabel = (cfg: { type: string; provider?: string; model: string } | undefined) =>
-            cfg ? `${cfg.type === "cloud" ? (cfg as { provider: string }).provider : cfg.type}/${cfg.model}` : null;
+      // ── POST /api/patches/:id/reject ───────────────────────────────────────
+      if (path.startsWith("/api/patches/") && path.endsWith("/reject") && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const id = path.split("/")[3];
+        if (!id) return json(res, 400, { error: "Patch ID is required" });
+        ctx.patchStore.updateStatus(id, "rejected");
+        return json(res, 200, { ok: true });
+      }
 
-          const activeModels = {
+      // ── POST /api/feedback ─────────────────────────────────────────────────
+      if (path === "/api/feedback" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as {
+          type: "positive" | "negative" | "neutral";
+          category: string;
+          observation: string;
+          impact?: "high" | "medium" | "low";
+          trait?: string;
+          isGolden?: boolean;
+          sessionId?: string;
+          taskId?: string;
+        };
+        const id = ctx.feedbackStore.createFeedback(body);
+        return json(res, 201, { ok: true, id });
+      }
+
+      // ── GET /api/traits ────────────────────────────────────────────────────
+      if (path === "/api/traits" && req.method === "GET") {
+        const traits = ctx.feedbackStore.listTraits();
+        return json(res, 200, { traits });
+      }
+
+      // ── GET /api/golden-examples ───────────────────────────────────────────
+      if (path === "/api/golden-examples" && req.method === "GET") {
+        const examples = ctx.feedbackStore.getGoldenExamples();
+        return json(res, 200, { examples });
+      }
+
+      // ── POST /api/diagnostics/enhance-prompt ────────────────────────────────
+      if (path === "/api/diagnostics/enhance-prompt" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as { prompt: string };
+        const userPrompt = body.prompt?.trim();
+        if (!userPrompt) return json(res, 400, { error: "Prompt is required" });
+
+        const system =
+          "You are an expert prompt engineer. Your task is to enhance the user's test prompt for an AI agent. " +
+          "The prompt should be descriptive, clear, and designed to test the agent's ability to use code tools and follow instructions. " +
+          "Keep it concise but effective. Return ONLY the enhanced prompt text, no prose or explanations.";
+
+        const result = await ctx.router.generate({
+          modelRole: "capable",
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: `Enhance this test prompt: "${userPrompt}"` },
+          ],
+        });
+
+        if (result.isErr()) {
+          return json(res, 500, { error: `Enhancement failed: ${result.error.message}` });
+        }
+
+        return json(res, 200, { enhanced: result.value.content?.trim() || userPrompt });
+      }
+
+      // ── POST /api/diagnostics/pipeline-test ─────────────────────────────────
+      // Runs a fixed test prompt through the agent to verify Ollama/code tools are wired.
+      // Test prompt: "Hi, dude. Can you create a discord in python and save it to our projects folder, please"
+      if (path === "/api/diagnostics/pipeline-test" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as {
+          prompt?: string;
+          projectName?: string;
+          maxAttempts?: number;
+          requireOllama?: boolean;
+          backend?: "auto" | "agent" | "codex" | "claude";
+        };
+        const PIPELINE_TEST_PROMPT = body.prompt?.trim() ||
+          "Hi, dude. Can you create a discord in python and save it to our projects folder, please";
+        const projectNameRaw = body.projectName?.trim() || "discord_bot";
+        const projectName = projectNameRaw.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
+        const maxAttempts = Math.max(1, Math.min(3, body.maxAttempts ?? 2));
+        const requireOllama = body.requireOllama === true;
+        const backendMode = body.backend ?? "auto";
+        const workspace = ctx.config.daemon.workspace ?? homedir();
+        const targetProjectRoot = join(workspace, projectName);
+        const pool = ctx.router.getPool();
+        const toLabel = (cfg: { type: string; provider?: string; model: string } | undefined) =>
+          cfg ? `${cfg.type === "cloud" ? (cfg as { provider: string }).provider : cfg.type}/${cfg.model}` : null;
+        const isOllamaConfig = (cfg: { type: string; provider?: string } | undefined) =>
+          !!cfg && cfg.type === "local" && (cfg as { provider?: string }).provider === "ollama";
+
+        const extractJsonObject = (text: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } => {
+          const trimmed = text.trim();
+          if (!trimmed) return { ok: false, error: "Empty response" };
+          try {
+            const direct = JSON.parse(trimmed) as unknown;
+            if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+              return { ok: true, value: direct as Record<string, unknown> };
+            }
+          } catch {
+            // Continue to fenced/substring extraction
+          }
+
+          const fenced = trimmed.match(/```json\s*([\s\S]*?)```/i) ?? trimmed.match(/```\s*([\s\S]*?)```/i);
+          if (fenced?.[1]) {
+            try {
+              const parsed = JSON.parse(fenced[1]) as unknown;
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                return { ok: true, value: parsed as Record<string, unknown> };
+              }
+            } catch {
+              // Fall through to brace extraction
+            }
+          }
+
+          const first = trimmed.indexOf("{");
+          const last = trimmed.lastIndexOf("}");
+          if (first >= 0 && last > first) {
+            const candidate = trimmed.slice(first, last + 1);
+            try {
+              const parsed = JSON.parse(candidate) as unknown;
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                return { ok: true, value: parsed as Record<string, unknown> };
+              }
+            } catch {
+              // ignored
+            }
+          }
+          return { ok: false, error: "Response did not contain valid JSON object" };
+        };
+
+        const walkFiles = (root: string, limit = 300): string[] => {
+          if (!existsSync(root)) return [];
+          const out: string[] = [];
+          const stack = [root];
+          while (stack.length > 0 && out.length < limit) {
+            const dir = stack.pop();
+            if (!dir) continue;
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const full = join(dir, entry.name);
+              if (entry.isDirectory()) {
+                stack.push(full);
+              } else if (entry.isFile()) {
+                out.push(full);
+                if (out.length >= limit) break;
+              }
+            }
+          }
+          return out;
+        };
+
+        const snapshotProject = (root: string) => {
+          const files = walkFiles(root);
+          const pythonFiles = files.filter((f) => f.endsWith(".py"));
+          return {
+            exists: existsSync(root),
+            root,
+            totalFiles: files.length,
+            pythonFiles,
+            files,
+          };
+        };
+
+        type BackendKind = "agent" | "codex" | "claude";
+        const backendOrder: BackendKind[] = backendMode === "auto"
+          ? ["codex", "claude", "agent"]
+          : [backendMode];
+
+        const runProcess = async (
+          cmd: string,
+          args: string[],
+          timeoutMs: number,
+        ): Promise<{ exitCode: number | null; stdout: string; stderr: string; timedOut: boolean; spawnError?: string }> =>
+          await new Promise((resolve) => {
+            const child = spawn(cmd, args, { cwd: workspace, env: { ...process.env } });
+            let stdout = "";
+            let stderr = "";
+            let timedOut = false;
+            let settled = false;
+            const finish = (payload: { exitCode: number | null; stdout: string; stderr: string; timedOut: boolean; spawnError?: string }) => {
+              if (settled) return;
+              settled = true;
+              resolve(payload);
+            };
+            const timer = setTimeout(() => {
+              timedOut = true;
+              child.kill("SIGTERM");
+              setTimeout(() => {
+                child.kill("SIGKILL");
+              }, 1200);
+            }, timeoutMs);
+            child.stdout?.on("data", (c: Buffer) => {
+              stdout += c.toString();
+            });
+            child.stderr?.on("data", (c: Buffer) => {
+              stderr += c.toString();
+            });
+            child.on("error", (e) => {
+              clearTimeout(timer);
+              finish({ exitCode: null, stdout, stderr, timedOut, spawnError: e.message });
+            });
+            child.on("close", (code) => {
+              clearTimeout(timer);
+              finish({ exitCode: code, stdout, stderr, timedOut });
+            });
+          });
+
+        const buildExternalArgs = async (kind: "codex" | "claude", prompt: string): Promise<{
+          available: boolean;
+          command: string;
+          args: string[];
+          reason?: string;
+          probeStdout?: string;
+          probeStderr?: string;
+        }> => {
+          const envBin = kind === "codex" ? process.env.ADAM_CODEX_BIN : process.env.ADAM_CLAUDE_BIN;
+          const envArgsJson = kind === "codex" ? process.env.ADAM_CODEX_ARGS_JSON : process.env.ADAM_CLAUDE_ARGS_JSON;
+          const command = envBin?.trim() || kind;
+
+          const probe = await runProcess(command, ["--help"], 3500);
+          const combinedHelp = `${probe.stdout}\n${probe.stderr}`;
+          if (probe.spawnError && probe.spawnError.toLowerCase().includes("enoent")) {
+            return { available: false, command, args: [], reason: `${command} not installed or not on PATH` };
+          }
+
+          let args: string[] = [];
+          if (envArgsJson?.trim()) {
+            try {
+              const parsed = JSON.parse(envArgsJson) as unknown;
+              if (Array.isArray(parsed) && parsed.every((v) => typeof v === "string")) {
+                args = parsed.map((v) => v.replaceAll("{{PROMPT}}", prompt));
+              } else {
+                return { available: false, command, args: [], reason: `${kind} args env must be a JSON string array` };
+              }
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              return { available: false, command, args: [], reason: `${kind} args env JSON parse failed: ${msg}` };
+            }
+          } else if (kind === "codex") {
+            args = /(^|\s)exec(\s|$)/i.test(combinedHelp) ? ["exec", prompt] : [prompt];
+          } else {
+            args = /(^|\s)-p(\s|,|$)|--print/i.test(combinedHelp) ? ["-p", prompt] : [prompt];
+          }
+
+          return {
+            available: true,
+            command,
+            args,
+            probeStdout: probe.stdout.slice(0, 1200),
+            probeStderr: probe.stderr.slice(0, 800),
+          };
+        };
+
+        const runPromptThroughBackend = async (
+          contractPrompt: string,
+          attemptNumber: number,
+        ): Promise<{
+          ok: boolean;
+          output: string;
+          backendUsed?: BackendKind;
+          error?: string;
+          errorCode?: string;
+          backendTrace: Array<{
+            backend: BackendKind;
+            available?: boolean;
+            command?: string;
+            argsPreview?: string[];
+            exitCode?: number | null;
+            timedOut?: boolean;
+            stdoutPreview?: string;
+            stderrPreview?: string;
+            error?: string;
+          }>;
+        }> => {
+          const trace: Array<{
+            backend: BackendKind;
+            available?: boolean;
+            command?: string;
+            argsPreview?: string[];
+            exitCode?: number | null;
+            timedOut?: boolean;
+            stdoutPreview?: string;
+            stderrPreview?: string;
+            error?: string;
+          }> = [];
+
+          for (const candidate of backendOrder) {
+            if (candidate === "agent") {
+              const msg: InboundMessage = {
+                id: generateId(),
+                sessionId: `pipeline-test-${Date.now()}-${attemptNumber}`,
+                source: "internal",
+                channelId: "diagnostics",
+                userId: "pipeline-test",
+                role: "user",
+                content: contractPrompt,
+                attachments: [],
+                receivedAt: new Date(),
+                metadata: { attempt: attemptNumber, backend: candidate },
+              };
+              const result = await runWithSession(msg.sessionId, () => ctx.agent.process(msg));
+              if (result.isErr()) {
+                trace.push({
+                  backend: candidate,
+                  available: true,
+                  error: `agent error: ${result.error.message}`,
+                });
+                continue;
+              }
+              const output = result.value.content ?? "";
+              trace.push({
+                backend: candidate,
+                available: true,
+                stdoutPreview: output.slice(0, 500),
+              });
+              return { ok: true, output, backendUsed: candidate, backendTrace: trace };
+            }
+
+            const cfg = await buildExternalArgs(candidate, contractPrompt);
+            if (!cfg.available) {
+              trace.push({
+                backend: candidate,
+                available: false,
+                command: cfg.command,
+                error: cfg.reason,
+              });
+              continue;
+            }
+
+            const run = await runProcess(cfg.command, cfg.args, 120_000);
+            const output = (run.stdout || "").trim();
+            const fail = run.spawnError || run.timedOut || run.exitCode !== 0 || output.length === 0;
+            trace.push({
+              backend: candidate,
+              available: true,
+              command: cfg.command,
+              argsPreview: cfg.args.slice(0, 6),
+              exitCode: run.exitCode,
+              timedOut: run.timedOut,
+              stdoutPreview: run.stdout.slice(0, 600),
+              stderrPreview: run.stderr.slice(0, 600),
+              error: run.spawnError,
+            });
+            if (fail) {
+              continue;
+            }
+            return { ok: true, output, backendUsed: candidate, backendTrace: trace };
+          }
+
+          const lastErr = trace[trace.length - 1]?.error ?? "No backend produced output";
+          return { ok: false, output: "", error: lastErr, errorCode: "backend-unavailable", backendTrace: trace };
+        };
+
+        const ollamaBaseUrl = ctx.config.providers.ollama.baseUrl;
+        const checkOllamaReachability = async () => {
+          if (!ctx.config.providers.ollama.enabled) {
+            return { reachable: false, status: "disabled", message: "Ollama disabled in config" };
+          }
+          const endpoint = `${ollamaBaseUrl.replace(/\/+$/, "")}/api/tags`;
+          try {
+            const ac = new AbortController();
+            const t = setTimeout(() => ac.abort(), 2500);
+            const res = await fetch(endpoint, { signal: ac.signal });
+            clearTimeout(t);
+            if (!res.ok) {
+              return { reachable: false, status: "http_error", message: `HTTP ${res.status} from ${endpoint}` };
+            }
+            return { reachable: true, status: "ok", message: `Reachable at ${endpoint}` };
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return { reachable: false, status: "unreachable", message: `${endpoint} not reachable: ${msg}` };
+          }
+        };
+
+        const ollamaProbe = await checkOllamaReachability();
+
+        const diagnostics = {
+          workspace,
+          targetProjectRoot,
+          requireOllama,
+          backendMode,
+          backendOrder,
+          maxAttempts,
+          pool: {
             fast: toLabel(pool.fast[0]),
             capable: toLabel(pool.capable[0]),
-          };
+            coder: toLabel(pool.coder[0]) ?? toLabel(pool.capable[0]),
+            ollamaInPool: pool.fast.some(isOllamaConfig) ||
+              pool.capable.some(isOllamaConfig) ||
+              pool.coder.some(isOllamaConfig),
+          },
+          configOllamaEnabled: ctx.config.providers.ollama.enabled,
+          ollamaProbe,
+        };
 
-          const cloudOn = [...new Set(
-            pool.fast.concat(pool.capable)
-              .filter((c) => c.type === "cloud")
-              .map((c) => (c as { provider: string }).provider)
-          )];
-          const localOn = [...new Set(
-            pool.fast.concat(pool.capable)
-              .filter((c) => c.type === "local")
-              .map((c) => (c as { provider: string }).provider)
-          )];
-
-          return json(res, 200, {
-            version: ADAM_VERSION,
-            uptime: Math.floor(process.uptime()),
-            agentName: ctx.config.daemon.agentName,
-            port: ctx.config.daemon.port,
-            providers: { cloud: cloudOn, local: localOn },
-            activeModels,
-            budget: ctx.config.budget,
-            memory: {
-              profileFacts: facts.length,
-              categories: [...new Set(facts.map((f) => f.category))],
-            },
-          });
+        const attempts: Array<{
+          attempt: number;
+          prompt: string;
+          backendUsed?: BackendKind;
+          backendTrace: Array<{
+            backend: BackendKind;
+            available?: boolean;
+            command?: string;
+            argsPreview?: string[];
+            exitCode?: number | null;
+            timedOut?: boolean;
+            stdoutPreview?: string;
+            stderrPreview?: string;
+            error?: string;
+          }>;
+          ok: boolean;
+          durationMs: number;
+          responseText?: string;
+          jsonParseOk: boolean;
+          jsonParseError?: string;
+          declaredPaths: string[];
+          fsSnapshot: { exists: boolean; totalFiles: number; pythonFiles: string[]; files: string[] };
+          failureReasons: string[];
+          error?: string;
+          errorCode?: string;
+        }> = [];
+        let successfulAttempt: number | null = null;
+        let finalResponseText = "";
+        const preflightFailures: string[] = [];
+        if (requireOllama && !diagnostics.pool.ollamaInPool) {
+          preflightFailures.push("requireOllama=true but Ollama is not in active model pool");
+        }
+        if (requireOllama && !diagnostics.ollamaProbe.reachable) {
+          preflightFailures.push(`requireOllama=true but ${diagnostics.ollamaProbe.message}`);
         }
 
-        // ── POST /api/chat ─────────────────────────────────────────────────────
-        if (path === "/api/chat" && req.method === "POST") {
-          const body = (await readBody(req)) as { message?: string; sessionId?: string };
-          const text = body.message?.trim();
-          if (!text) return json(res, 400, { error: "message is required" });
-
-          const sessionId = body.sessionId ?? generateSessionId();
-
-          // ── Slash command interception ──────────────────────────────────────
-          // Handle /commands directly so they don't reach the agent as natural
-          // language and accidentally trigger skill design mode.
-
-          if (text.startsWith("/remember ")) {
-            const rest = text.slice("/remember ".length).trim();
-            const eqIdx = rest.indexOf("=");
-            if (eqIdx !== -1) {
-              const key = rest.slice(0, eqIdx).trim();
-              const val = rest.slice(eqIdx + 1).trim();
-              ctx.profile.set(key, val, { source: "manual" });
-              ctx.profile.protect(key);
-              return json(res, 200, { response: `Stored and protected: **${key}** = ${val}`, sessionId });
-            }
-            return json(res, 200, { response: "Usage: /remember key = value", sessionId });
-          }
-
-          if (text.startsWith("/forget ")) {
-            const key = text.slice("/forget ".length).trim();
-            if (key === "all") {
-              for (const f of ctx.profile.getAll()) ctx.profile.delete(f.key);
-              return json(res, 200, { response: "All profile memory cleared.", sessionId });
-            }
-            ctx.profile.delete(key);
-            return json(res, 200, { response: `Deleted memory: **${key}**`, sessionId });
-          }
-
-          if (text === "/memory") {
-            const facts = ctx.profile.getAll();
-            if (!facts.length) return json(res, 200, { response: "No profile memory stored yet.", sessionId });
-            const lines = facts.map((f) => {
-              const pct = Math.round(f.confidence * 100);
-              const bar = "█".repeat(Math.round(f.confidence * 10)) + "░".repeat(10 - Math.round(f.confidence * 10));
-              const badge = f.protected ? "🔒" : f.source === "manual" ? "✋" : "🤖";
-              return `${badge} **${f.key}** = ${f.value}\n   ${bar} ${pct}%`;
-            });
-            return json(res, 200, { response: lines.join("\n\n"), sessionId });
-          }
-
-          if (text === "/pad") {
-            const content = ctx.scratchpad.load();
-            return json(res, 200, { response: content || "Scratchpad is empty.", sessionId });
-          }
-
-          if (text === "/pad clear") {
-            const { unlinkSync, existsSync } = await import("node:fs");
-            if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
-            return json(res, 200, { response: "Scratchpad cleared.", sessionId });
-          }
-
-          if (text === "/workshop" || text === "/skills") {
-            const skills = ctx.skills.list();
-            if (!skills.length) return json(res, 200, { response: "No skill specs found.", sessionId });
-            const lines = skills.map((s) => `**${s.status.toUpperCase()}** · ${s.name} · \`${s.id}\``);
-            return json(res, 200, { response: lines.join("\n"), sessionId });
-          }
-
-          if (text.startsWith("/workshop show ")) {
-            const id = text.slice("/workshop show ".length).trim().replace(/"/g, "");
-            const skill = ctx.skills.get(id);
-            if (!skill) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
-            const steps = skill.steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n");
-            const triggers = skill.triggers.join(", ");
-            const tools = skill.allowedTools.join(", ");
-            const constraintsLine = (skill.constraints && skill.constraints.length > 0)
-              ? "\n**Constraints:** " + skill.constraints.join(", ")
+        try {
+          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const prior = attempts[attempts.length - 1];
+            const retryContext = prior && !prior.ok
+              ? `\n\nPrevious attempt failed for these concrete reasons:\n- ${prior.failureReasons.join("\n- ")}\nRetry by actually creating files and returning strict JSON only.`
               : "";
-            const out = [
-              `📋 **${skill.name}** \`${skill.id}\``,
-              `*${skill.description}*`,
-              ``,
-              `**Status:** ${skill.status}`,
-              `**Triggers:** ${triggers}`,
-              `**Tools allowed:** ${tools}`,
-              ``,
-              `**Steps:**\n${steps}`,
-              constraintsLine,
-              `\n**Success when:** ${Array.isArray(skill.successCriteria) ? skill.successCriteria.join(", ") : String(skill.successCriteria)}`,
-            ].filter(Boolean).join("\n");
-            return json(res, 200, { response: out, sessionId });
-          }
+            const contractPrompt = [
+              PIPELINE_TEST_PROMPT,
+              "",
+              `Hard requirements for this test attempt #${attempt}:`,
+              `1) Create files under exactly this absolute folder: ${targetProjectRoot}`,
+              "2) Create at least one Python source file (.py)",
+              "3) Do not claim success unless files are physically written",
+              "4) Return ONLY valid JSON, no prose, with schema:",
+              '{"status":"success|retry|failed","projectRoot":"<abs_path>","createdPaths":["<abs_or_rel_path>"],"notes":"<short>","errors":["<reason>"]}',
+              retryContext,
+            ].join("\n");
 
-          if (text.startsWith("/workshop approve ")) {
-            const id = text.slice("/workshop approve ".length).trim().replace(/"/g, "");
-            const existing = ctx.skills.get(id);
-            if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\`\n\nRun \`/workshop\` to list all skills and check the ID.`, sessionId });
-            if (existing.status !== "draft") return json(res, 200, { response: `Cannot approve \`${existing.name}\` — current status is **${existing.status}**, not draft.\n\nOnly draft skills can be approved.`, sessionId });
-            const skill = ctx.skills.approve(id)!;
-            return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\n\nRun \`/workshop latent ${id}\` to mark it latent, or view it in the Skills tab.`, sessionId });
-          }
+            const started = Date.now();
+            const result = await runPromptThroughBackend(contractPrompt, attempt);
+            const durationMs = Date.now() - started;
 
-          if (text.startsWith("/workshop latent ")) {
-            const id = text.slice("/workshop latent ".length).trim().replace(/"/g, "");
-            const existing = ctx.skills.get(id);
-            if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
-            if (!["draft", "approved"].includes(existing.status)) return json(res, 200, { response: `Cannot mark \`${existing.name}\` as latent — current status is **${existing.status}**.`, sessionId });
-            const skill = ctx.skills.makeLatent(id)!;
-            return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: ${existing.status} → latent`, sessionId });
-          }
+            if (!result.ok) {
+              const fsSnapshot = snapshotProject(targetProjectRoot);
+              attempts.push({
+                attempt,
+                prompt: contractPrompt,
+                backendUsed: result.backendUsed,
+                backendTrace: result.backendTrace,
+                ok: false,
+                durationMs,
+                jsonParseOk: false,
+                jsonParseError: "Backend execution error",
+                declaredPaths: [],
+                fsSnapshot: {
+                  exists: fsSnapshot.exists,
+                  totalFiles: fsSnapshot.totalFiles,
+                  pythonFiles: fsSnapshot.pythonFiles,
+                  files: fsSnapshot.files,
+                },
+                failureReasons: [`Backend error: ${result.error ?? "unknown"}`],
+                error: result.error,
+                errorCode: result.errorCode,
+              });
+              continue;
+            }
 
-          if (text.startsWith("/workshop deprecate ")) {
-            const id = text.slice("/workshop deprecate ".length).trim().replace(/"/g, "");
-            const existing = ctx.skills.get(id);
-            if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
-            const skill = ctx.skills.deprecate(id)!;
-            return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
-          }
+            finalResponseText = result.output;
+            const parsed = extractJsonObject(finalResponseText);
+            const parsedValue = parsed.ok ? parsed.value : {};
+            const rawPaths = parsed.ok && Array.isArray(parsedValue.createdPaths)
+              ? parsedValue.createdPaths
+              : [];
+            const declaredPaths = rawPaths
+              .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+              .map((p) => p.trim());
 
-          if (text === "/help") {
-            return json(res, 200, {
-              response: [
-                "**Slash commands available in chat:**",
-                "",
-                "`/memory` — show profile facts with confidence levels",
-                "`/remember key = value` — store a protected memory fact",
-                "`/forget key` — delete a memory fact",
-                "`/forget all` — clear all profile memory",
-                "`/pad` — view Adam's scratchpad",
-                "`/pad clear` — clear the scratchpad",
-                "`/workshop` — list all skill specs",
-                "`/workshop show <id>` — view a skill spec",
-                "`/workshop approve <id>` — approve a draft skill",
-                "`/workshop latent <id>` — mark a skill as latent",
-                "`/workshop deprecate <id>` — deprecate a skill",
-                "`/help` — show this list",
-              ].join("\n"), sessionId
+            const fsSnapshot = snapshotProject(targetProjectRoot);
+            const failureReasons: string[] = [];
+            if (!parsed.ok) failureReasons.push(`Invalid JSON response: ${parsed.error}`);
+            if (!fsSnapshot.exists) failureReasons.push(`Target folder does not exist: ${targetProjectRoot}`);
+            if (fsSnapshot.totalFiles === 0) failureReasons.push("No files were created in target project folder");
+            if (fsSnapshot.pythonFiles.length === 0) failureReasons.push("No Python (.py) files were created");
+            if (parsed.ok && declaredPaths.length === 0) {
+              failureReasons.push("JSON returned but createdPaths is empty");
+            }
+            for (const p of declaredPaths) {
+              const absolute = /^[a-zA-Z]:\\|^\//.test(p) ? p : join(workspace, p);
+              if (!existsSync(absolute)) {
+                failureReasons.push(`Declared path not found on disk: ${absolute}`);
+                continue;
+              }
+              const s = statSync(absolute);
+              if (s.isFile() && s.size === 0) {
+                failureReasons.push(`Declared file is empty: ${absolute}`);
+              }
+            }
+            if (preflightFailures.length > 0) {
+              failureReasons.push(...preflightFailures);
+            }
+
+            const ok = failureReasons.length === 0;
+            attempts.push({
+              attempt,
+              prompt: contractPrompt,
+              backendUsed: result.backendUsed,
+              backendTrace: result.backendTrace,
+              ok,
+              durationMs,
+              responseText: finalResponseText,
+              jsonParseOk: parsed.ok,
+              jsonParseError: parsed.ok ? undefined : parsed.error,
+              declaredPaths,
+              fsSnapshot: {
+                exists: fsSnapshot.exists,
+                totalFiles: fsSnapshot.totalFiles,
+                pythonFiles: fsSnapshot.pythonFiles,
+                files: fsSnapshot.files,
+              },
+              failureReasons,
             });
+
+            if (ok) {
+              successfulAttempt = attempt;
+              break;
+            }
           }
 
-          // ── Normal agent message ────────────────────────────────────────────
-          const msg: InboundMessage = {
-            id: generateId(),
-            sessionId,
-            source: "internal",
-            channelId: "web",
-            userId: "local-user",
-            role: "user",
-            content: text,
-            attachments: [],
-            receivedAt: new Date(),
-            metadata: {},
-          };
+          const ok = successfulAttempt !== null;
+          const nextActions: string[] = [];
+          if (!diagnostics.configOllamaEnabled) {
+            nextActions.push("Enable Ollama in config.providers.ollama.enabled");
+          }
+          if (!diagnostics.pool.ollamaInPool) {
+            nextActions.push("No Ollama model in active pool; reload provider config and verify model names");
+          }
+          if (!diagnostics.ollamaProbe.reachable) {
+            nextActions.push(`Start Ollama or fix base URL: ${diagnostics.ollamaProbe.message}`);
+          }
+          if (!ok) {
+            nextActions.push("Inspect attempts[].failureReasons and rerun pipeline-test after fixes");
+            const sawCodexUnavailable = attempts.some((a) =>
+              a.backendTrace.some((t) => t.backend === "codex" && t.available === false));
+            const sawClaudeUnavailable = attempts.some((a) =>
+              a.backendTrace.some((t) => t.backend === "claude" && t.available === false));
+            const sawBackendTimeout = attempts.some((a) =>
+              a.backendTrace.some((t) => t.timedOut === true));
+            if (sawCodexUnavailable) {
+              nextActions.push("Install Codex CLI or set ADAM_CODEX_BIN/ADAM_CODEX_ARGS_JSON");
+            }
+            if (sawClaudeUnavailable) {
+              nextActions.push("Install Claude Code CLI or set ADAM_CLAUDE_BIN/ADAM_CLAUDE_ARGS_JSON");
+            }
+            if (sawBackendTimeout) {
+              nextActions.push("Backend command timed out; ensure non-interactive CLI args are configured");
+            }
+          }
 
-          const result = await ctx.agent.process(msg);
-          if (result.isErr()) return json(res, 500, { error: result.error.message });
-          return json(res, 200, { response: result.value.content, sessionId });
-        }
-
-        // ── GET /api/memory/profile ────────────────────────────────────────────
-        if (path === "/api/memory/profile" && req.method === "GET") {
-          return json(res, 200, { facts: ctx.profile.getAll() });
-        }
-
-        // ── DELETE /api/memory/profile/:key ───────────────────────────────────
-        if (path.startsWith("/api/memory/profile/") && req.method === "DELETE") {
-          const key = decodeURIComponent(path.slice("/api/memory/profile/".length));
-          ctx.profile.delete(key);
-          return json(res, 200, { ok: true });
-        }
-
-        // ── GET /api/memory/episodic ───────────────────────────────────────────
-        if (path === "/api/memory/episodic" && req.method === "GET") {
-          const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
-          const days = parseInt(url.searchParams.get("days") ?? "30", 10);
-          return json(res, 200, { entries: ctx.episodic.getRecentAcrossSessions(limit, days) });
-        }
-
-        // ── GET /api/config ────────────────────────────────────────────────────
-        if (path === "/api/config" && req.method === "GET") {
           return json(res, 200, {
-            daemon: ctx.config.daemon,
-            discord: ctx.config.adapters.discord,
-            telegram: ctx.config.adapters.telegram,
-            budget: ctx.config.budget,
-          });
-        }
-
-        // ── PATCH /api/config/discord ──────────────────────────────────────────
-        if (path === "/api/config/discord" && req.method === "PATCH") {
-          const patch = (await readBody(req)) as Partial<DiscordAdapterConfig>;
-          const updated: AdamConfig = {
-            ...ctx.config,
-            adapters: {
-              ...ctx.config.adapters,
-              discord: { ...ctx.config.adapters.discord, ...patch },
+            ok,
+            prompt: PIPELINE_TEST_PROMPT,
+            response: finalResponseText,
+            diagnostics,
+            attempts,
+            summary: {
+              successfulAttempt,
+              attemptsRun: attempts.length,
+              projectRoot: targetProjectRoot,
+              filesCreated: attempts[attempts.length - 1]?.fsSnapshot.totalFiles ?? 0,
+              pythonFilesCreated: attempts[attempts.length - 1]?.fsSnapshot.pythonFiles.length ?? 0,
             },
-          };
-          const saveResult = saveConfig(updated);
-          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-          ctx.config = updated;
-          // Hot-reload the Discord adapter if it's running
-          if (ctx.discordAdapter) ctx.discordAdapter.updateConfig(updated.adapters.discord);
-          return json(res, 200, { ok: true, config: updated.adapters.discord });
-        }
-
-        // ── PATCH /api/config/daemon ───────────────────────────────────────────
-        if (path === "/api/config/daemon" && req.method === "PATCH") {
-          const patch = (await readBody(req)) as Partial<AdamConfig["daemon"]>;
-          const updated: AdamConfig = {
-            ...ctx.config,
-            daemon: { ...ctx.config.daemon, ...patch },
-          };
-          const saveResult = saveConfig(updated);
-          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-          ctx.config = updated;
-          return json(res, 200, { ok: true, config: updated.daemon });
-        }
-
-        // ── PATCH /api/config/budget ───────────────────────────────────────────
-        if (path === "/api/config/budget" && req.method === "PATCH") {
-          const patch = (await readBody(req)) as Partial<AdamConfig["budget"]>;
-          const updated: AdamConfig = {
-            ...ctx.config,
-            budget: { ...ctx.config.budget, ...patch },
-          };
-          const saveResult = saveConfig(updated);
-          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-          ctx.config = updated;
-          return json(res, 200, { ok: true, config: updated.budget });
-        }
-
-        // ── GET /api/config/memory ─────────────────────────────────────────────
-        if (path === "/api/config/memory" && req.method === "GET") {
-          return json(res, 200, { memory: ctx.config.memory });
-        }
-
-        // ── PATCH /api/config/memory ───────────────────────────────────────────
-        if (path === "/api/config/memory" && req.method === "PATCH") {
-          const patch = (await readBody(req)) as Partial<AdamConfig["memory"]>;
-          const updated: AdamConfig = {
-            ...ctx.config,
-            memory: { ...ctx.config.memory, ...patch },
-          };
-          const saveResult = saveConfig(updated);
-          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-          ctx.config = updated;
-          // Hot-reload consolidator parameters immediately
-          if (ctx.consolidator) ctx.consolidator.updateOptions(patch);
-          return json(res, 200, { ok: true, config: updated.memory });
-        }
-
-        // ── GET /api/vault/status ─────────────────────────────────────────────
-        if (path === "/api/vault/status" && req.method === "GET") {
-          const keys = [
-            "provider:anthropic:api-key",
-            "provider:openai:api-key",
-            "provider:google:api-key",
-            "provider:groq:api-key",
-            "provider:xai:api-key",
-            "provider:mistral:api-key",
-            "provider:deepseek:api-key",
-            "provider:openrouter:api-key",
-            "provider:qwen:api-key",
-            "provider:huggingface:api-key",
-            "adapter:discord:bot-token",
-            "adapter:telegram:bot-token",
-          ];
-          const status: Record<string, boolean> = {};
-          for (const key of keys) {
-            const r = await vault.get(key);
-            status[key] = r.isOk() && !!r.value;
-          }
-          return json(res, 200, { status });
-        }
-
-        // ── POST /api/vault/set ────────────────────────────────────────────────
-        if (path === "/api/vault/set" && req.method === "POST") {
-          const body = (await readBody(req)) as { key?: string; value?: string };
-          if (!body.key || typeof body.value !== "string") {
-            return json(res, 400, { error: "key and value are required" });
-          }
-          const trimmed = body.value.trim();
-          if (!trimmed) return json(res, 400, { error: "value cannot be empty" });
-          const r = await vault.set(body.key, trimmed);
-          if (r.isErr()) return json(res, 500, { error: r.error.message });
-          return json(res, 200, { ok: true });
-        }
-
-        // ── DELETE /api/vault/key ──────────────────────────────────────────────
-        if (path === "/api/vault/key" && req.method === "DELETE") {
-          const body = (await readBody(req)) as { key?: string };
-          if (!body.key) return json(res, 400, { error: "key is required" });
-          const dr = await vault.delete(body.key);
-          if (dr.isErr()) return json(res, 500, { error: dr.error.message });
-          return json(res, 200, { ok: true });
-        }
-
-        // ── GET /api/config/providers ──────────────────────────────────────────
-        if (path === "/api/config/providers" && req.method === "GET") {
-          return json(res, 200, { providers: ctx.config.providers });
-        }
-
-        // ── PATCH /api/config/providers ────────────────────────────────────────
-        if (path === "/api/config/providers" && req.method === "PATCH") {
-          const patch = (await readBody(req)) as Partial<AdamConfig["providers"]>;
-          const updated: AdamConfig = {
-            ...ctx.config,
-            providers: { ...ctx.config.providers, ...patch },
-          };
-          const saveResult = saveConfig(updated);
-          if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
-          ctx.config = updated;
-
-          // Rebuild the model pool from the new config so the change takes effect
-          // immediately — no restart required.
-          const newPool = await buildModelPool(updated);
-          ctx.router.replaceRegistry(new ProviderRegistry(newPool));
-          logger.info("Model pool hot-reloaded after provider config change");
-
-          return json(res, 200, { ok: true, providers: updated.providers });
-        }
-
-        // ── GET /api/personality ───────────────────────────────────────────────
-        if (path === "/api/personality" && req.method === "GET") {
+            nextActions,
+          });
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
           return json(res, 200, {
-            content: ctx.personality.loadOrSeed(),
-            path: ctx.personality.path,
+            ok: false,
+            error: errMsg,
+            diagnostics,
+            prompt: PIPELINE_TEST_PROMPT,
+            attempts,
           });
         }
+      }
 
-        // ── PATCH /api/personality ─────────────────────────────────────────────
-        if (path === "/api/personality" && req.method === "PATCH") {
-          const body = (await readBody(req)) as { content?: string };
-          if (typeof body.content !== "string" || !body.content.trim()) {
-            return json(res, 400, { error: "content is required" });
-          }
-          ctx.personality.save(body.content);
-          return json(res, 200, { ok: true, content: ctx.personality.load() });
-        }
+      // ── GET /api/status ────────────────────────────────────────────────────
+      if (path === "/api/status" && req.method === "GET") {
+        const facts = ctx.profile.getAll();
 
-        // ── POST /api/personality/reset ────────────────────────────────────────
-        if (path === "/api/personality/reset" && req.method === "POST") {
-          ctx.personality.reset();
-          return json(res, 200, { ok: true, content: ctx.personality.load() });
-        }
+        // Derive active provider lists from the actual loaded pool —
+        // these are vault-verified at startup/reload, not just config flags.
+        const pool = ctx.router.getPool();
+        const toLabel = (cfg: { type: string; provider?: string; model: string } | undefined) =>
+          cfg ? `${cfg.type === "cloud" ? (cfg as { provider: string }).provider : cfg.type}/${cfg.model}` : null;
 
-        // ── GET /api/scratchpad ────────────────────────────────────────────────
-        if (path === "/api/scratchpad" && req.method === "GET") {
-          return json(res, 200, {
-            content: ctx.scratchpad.load(),
-            lastModified: ctx.scratchpad.lastModified()?.toISOString() ?? null,
-            path: ctx.scratchpad.path,
+        const activeModels = {
+          fast: toLabel(pool.fast[0]),
+          capable: toLabel(pool.capable[0]),
+        };
+
+        const cloudOn = [...new Set(
+          pool.fast.concat(pool.capable)
+            .filter((c) => c.type === "cloud")
+            .map((c) => (c as { provider: string }).provider)
+        )];
+        const localOn = [...new Set(
+          pool.fast.concat(pool.capable)
+            .filter((c) => c.type === "local")
+            .map((c) => (c as { provider: string }).provider)
+        )];
+
+        return json(res, 200, {
+          version: ADAM_VERSION,
+          uptime: Math.floor(process.uptime()),
+          agentName: ctx.config.daemon.agentName,
+          port: ctx.config.daemon.port,
+          providers: { cloud: cloudOn, local: localOn },
+          activeModels,
+          budget: ctx.config.budget,
+          memory: {
+            profileFacts: facts.length,
+            categories: [...new Set(facts.map((f) => f.category))],
+          },
+        });
+      }
+
+      // ── GET /api/jobs ──────────────────────────────────────────────────────
+      if (path === "/api/jobs" && req.method === "GET") {
+        const active = ctx.jobRegistry.getActiveJobForRepo(process.cwd());
+        return json(res, 200, {
+          activeJob: active ?? null,
+        });
+      }
+
+      // ── GET /api/jobs/:id/events?afterSeq=123 ─────────────────────────────────
+      // Incremental polling — adapters can fetch new events without re-fetching all.
+      if (path.match(/^\/api\/jobs\/[^/]+\/events$/) && req.method === "GET") {
+        const id = path.slice("/api/jobs/".length, -"/events".length);
+        const job = ctx.jobRegistry.get(id);
+        if (!job) return json(res, 404, { error: "Job not found" });
+        const afterParam = url.searchParams.get("afterSeq");
+        const afterSeq = afterParam != null ? parseInt(afterParam, 10) : NaN;
+        const fromSeq = !isNaN(afterSeq) ? afterSeq + 1 : 0; // afterSeq=123 → seq > 123; no param → all
+        const events = ctx.jobRegistry.getEvents(id, fromSeq);
+        return json(res, 200, { events });
+      }
+
+      // ── GET /api/jobs/:id ──────────────────────────────────────────────────
+      if (path.startsWith("/api/jobs/") && !path.endsWith("/cancel") && !path.endsWith("/events") && req.method === "GET") {
+        const id = path.slice("/api/jobs/".length);
+        const job = ctx.jobRegistry.get(id);
+        if (!job) return json(res, 404, { error: "Job not found" });
+        const events = ctx.jobRegistry.getEvents(id);
+        return json(res, 200, { job, events });
+      }
+
+      // ── POST /api/jobs ─────────────────────────────────────────────────────
+      if (path === "/api/jobs" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as {
+          branch?: string;
+          goal?: string;
+          repoPath?: string;
+          requiresApproval?: boolean;
+        };
+        const branch = body.branch?.trim() ?? "main";
+        const goal = body.goal?.trim() || undefined;
+        const repoPath = body.repoPath?.trim() ?? process.cwd();
+        const requiresApproval = body.requiresApproval !== false;
+        const result = ctx.jobRegistry.create(branch, requiresApproval, goal);
+        if (result.isErr()) return json(res, 500, { error: result.error.message });
+        const jobId = result.value;
+
+        // Spawn worker process (runs in separate process per design)
+        const __dir = dirname(fileURLToPath(import.meta.url));
+        const workerPath = join(__dir, "build-supervisor-worker.js");
+        if (existsSync(workerPath)) {
+          const child = spawn(process.execPath, [workerPath, jobId], {
+            cwd: repoPath,
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env },
           });
+          child.on("error", (e) => logger.error("BuildSupervisor worker error", { error: e.message }));
+          child.on("exit", (code, signal) => {
+            if (code !== 0 && code !== null)
+              logger.warn("BuildSupervisor worker exited", { jobId, code, signal });
+          });
+        } else {
+          logger.warn("BuildSupervisor worker not found", { workerPath });
         }
 
-        // ── PATCH /api/scratchpad ──────────────────────────────────────────────
-        if (path === "/api/scratchpad" && req.method === "PATCH") {
-          const body = (await readBody(req)) as { content?: string };
-          if (typeof body.content !== "string") {
-            return json(res, 400, { error: "content is required" });
+        return json(res, 201, { jobId });
+      }
+
+      // ── POST /api/jobs/:id/cancel ──────────────────────────────────────────
+      if (path.endsWith("/cancel") && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const id = path.slice("/api/jobs/".length, -"/cancel".length);
+        const result = ctx.jobRegistry.requestCancel(id);
+        if (result.isErr()) return json(res, 500, { error: result.error.message });
+        return json(res, 200, { ok: true });
+      }
+
+      // ── POST /api/chat ─────────────────────────────────────────────────────
+      if (path === "/api/chat" && req.method === "POST") {
+        const body = (await readBody(req)) as { message?: string; sessionId?: string };
+        const text = body.message?.trim();
+        if (!text) return json(res, 400, { error: "message is required" });
+
+        const sessionId = body.sessionId ?? generateSessionId();
+        const workspaceRoot = resolveWorkspace(ctx.config);
+        const projectRoot = /[\\/]projects$/i.test(workspaceRoot) ? workspaceRoot : join(workspaceRoot, "projects");
+        const buildIntentRegex = /\b(create|build|scaffold|project|application|app|bot|script|implement|add|edit|update)\b/i;
+        const isBuildIntent = buildIntentRegex.test(text);
+
+        const collectFiles = (roots: string[], limit = 2000): Map<string, { mtimeMs: number; size: number }> => {
+          const out = new Map<string, { mtimeMs: number; size: number }>();
+          for (const root of roots) {
+            if (!existsSync(root)) continue;
+            const stack = [root];
+            while (stack.length > 0 && out.size < limit) {
+              const dir = stack.pop();
+              if (!dir) continue;
+              for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                const full = join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist") continue;
+                  stack.push(full);
+                } else if (entry.isFile()) {
+                  try {
+                    const st = statSync(full);
+                    out.set(full, { mtimeMs: st.mtimeMs, size: st.size });
+                  } catch {
+                    /* ignore transient fs entries */
+                  }
+                }
+                if (out.size >= limit) break;
+              }
+            }
           }
-          ctx.scratchpad.save(body.content);
-          return json(res, 200, { ok: true, lastModified: ctx.scratchpad.lastModified()?.toISOString() });
+          return out;
+        };
+
+        const evidenceRoots = [projectRoot, workspaceRoot];
+        const snapshotBefore = isBuildIntent ? collectFiles(evidenceRoots) : null;
+
+        // ── Slash command interception ──────────────────────────────────────
+        // Handle /commands directly so they don't reach the agent as natural
+        // language and accidentally trigger skill design mode.
+
+        if (text.startsWith("/remember ")) {
+          if (!requireAdmin()) return;
+          const rest = text.slice("/remember ".length).trim();
+          const eqIdx = rest.indexOf("=");
+          if (eqIdx !== -1) {
+            const key = rest.slice(0, eqIdx).trim();
+            const val = rest.slice(eqIdx + 1).trim();
+            ctx.profile.set(key, val, { source: "manual" });
+            ctx.profile.protect(key);
+            return json(res, 200, { response: `Stored and protected: **${key}** = ${val}`, sessionId });
+          }
+          return json(res, 200, { response: "Usage: /remember key = value", sessionId });
         }
 
-        // ── DELETE /api/scratchpad ─────────────────────────────────────────────
-        if (path === "/api/scratchpad" && req.method === "DELETE") {
+        if (text.startsWith("/forget ")) {
+          if (!requireAdmin()) return;
+          const key = text.slice("/forget ".length).trim();
+          if (key === "all") {
+            for (const f of ctx.profile.getAll()) ctx.profile.delete(f.key);
+            return json(res, 200, { response: "All profile memory cleared.", sessionId });
+          }
+          ctx.profile.delete(key);
+          return json(res, 200, { response: `Deleted memory: **${key}**`, sessionId });
+        }
+
+        if (text === "/memory") {
+          const facts = ctx.profile.getAll();
+          if (!facts.length) return json(res, 200, { response: "No profile memory stored yet.", sessionId });
+          const lines = facts.map((f) => {
+            const pct = Math.round(f.confidence * 100);
+            const bar = "█".repeat(Math.round(f.confidence * 10)) + "░".repeat(10 - Math.round(f.confidence * 10));
+            const badge = f.protected ? "🔒" : f.source === "manual" ? "✋" : "🤖";
+            return `${badge} **${f.key}** = ${f.value}\n   ${bar} ${pct}%`;
+          });
+          return json(res, 200, { response: lines.join("\n\n"), sessionId });
+        }
+
+        if (text === "/pad") {
+          const content = ctx.scratchpad.load();
+          return json(res, 200, { response: content || "Scratchpad is empty.", sessionId });
+        }
+
+        if (text === "/pad clear") {
+          if (!requireAdmin()) return;
           const { unlinkSync, existsSync } = await import("node:fs");
           if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
-          return json(res, 200, { ok: true });
+          return json(res, 200, { response: "Scratchpad cleared.", sessionId });
         }
 
-        // ── GET /api/skills ────────────────────────────────────────────────────
-        if (path === "/api/skills" && req.method === "GET") {
-          return json(res, 200, { skills: ctx.skills.list() });
+        if (text === "/workshop" || text === "/skills") {
+          const skills = ctx.skills.list();
+          if (!skills.length) return json(res, 200, { response: "No skill specs found.", sessionId });
+          const lines = skills.map((s) => `**${s.status.toUpperCase()}** · ${s.name} · \`${s.id}\``);
+          return json(res, 200, { response: lines.join("\n"), sessionId });
         }
 
-        // ── GET /api/skills/:id ────────────────────────────────────────────────
-        if (path.startsWith("/api/skills/") && req.method === "GET" && !path.includes("/action/")) {
-          const id = path.slice("/api/skills/".length);
+        if (text.startsWith("/workshop show ")) {
+          const id = text.slice("/workshop show ".length).trim().replace(/"/g, "");
           const skill = ctx.skills.get(id);
-          if (!skill) return json(res, 404, { error: "Skill not found" });
-          return json(res, 200, { skill });
+          if (!skill) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          const steps = skill.steps.map((s, i) => `  ${i + 1}. ${s}`).join("\n");
+          const triggers = skill.triggers.join(", ");
+          const tools = skill.allowedTools.join(", ");
+          const out = [
+            `📋 **${skill.name}** \`${skill.id}\``,
+            `*${skill.description}*`,
+            ``,
+            `**Status:** ${skill.status}`,
+            `**Triggers:** ${triggers}`,
+            `**Tools allowed:** ${tools}`,
+            ``,
+            `**Steps:**\n${steps}`,
+            skill.constraints?.length ? `\n**Constraints:** ${skill.constraints.join(", ")}` : "",
+            `\n**Success when:** ${skill.successCriteria}`,
+          ].filter(Boolean).join("\n");
+          return json(res, 200, { response: out, sessionId });
         }
 
-        // ── PATCH /api/skills/:id ──────────────────────────────────────────────
-        if (path.startsWith("/api/skills/") && req.method === "PATCH" && !path.includes("/action/")) {
-          const id = path.slice("/api/skills/".length);
-          const skill = ctx.skills.get(id);
-          if (!skill) return json(res, 404, { error: "Skill not found" });
-          const patch = (await readBody(req)) as Partial<typeof skill>;
-          // Only allow editing notes and steps on drafts — status changes go through actions
-          if (skill.status === "draft") {
-            if (patch.notes !== undefined) skill.notes = patch.notes;
-            if (patch.steps !== undefined) skill.steps = patch.steps;
-            if (patch.constraints !== undefined) skill.constraints = patch.constraints;
-            if (patch.successCriteria !== undefined) skill.successCriteria = patch.successCriteria;
-          }
-          ctx.skills.save(skill);
-          return json(res, 200, { ok: true, skill });
+        if (text.startsWith("/workshop approve ")) {
+          if (!requireAdmin()) return;
+          const id = text.slice("/workshop approve ".length).trim().replace(/"/g, "");
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\`\n\nRun \`/workshop\` to list all skills and check the ID.`, sessionId });
+          if (existing.status !== "draft") return json(res, 200, { response: `Cannot approve \`${existing.name}\` — current status is **${existing.status}**, not draft.\n\nOnly draft skills can be approved.`, sessionId });
+          const skill = ctx.skills.approve(id)!;
+          return json(res, 200, { response: `✅ Approved: **${skill.name}** (\`${skill.id}\`)\nStatus: draft → approved\nTemplate: \`${skill.template}\`\n\nRun \`/workshop activate ${id}\` to make it executable.`, sessionId });
         }
 
-        // ── DELETE /api/skills/:id ─────────────────────────────────────────────
-        if (path.startsWith("/api/skills/") && req.method === "DELETE" && !path.includes("/action/")) {
-          const id = path.slice("/api/skills/".length);
-          const deleted = ctx.skills.delete(id);
-          return json(res, deleted ? 200 : 404, { ok: deleted });
-        }
-
-        // ── POST /api/skills/:id/action/:action ────────────────────────────────
-        // Lifecycle transitions — these are the only gates to status changes
-        if (path.startsWith("/api/skills/") && path.includes("/action/") && req.method === "POST") {
-          const parts = path.split("/");
-          const id = parts[3];
-          const action = parts[5];
-          let updated = null;
-
-          if (!id) return json(res, 400, { error: "Skill ID is required" });
-
-          if (action === "approve") updated = ctx.skills.approve(id);
-          else if (action === "latent") updated = ctx.skills.makeLatent(id);
-          else if (action === "deprecate") updated = ctx.skills.deprecate(id);
-          else if (action === "activate") {
-            const body = (await readBody(req)) as { template?: string };
-            const template = (body.template ?? "none") as Parameters<typeof ctx.skills.activate>[1];
-            updated = ctx.skills.activate(id, template);
-          }
-
-          if (!updated) return json(res, 400, { error: `Cannot apply action '${action}' to this skill in its current state` });
-          return json(res, 200, { ok: true, skill: updated });
-        }
-
-        // ── POST /api/tools/execute ────────────────────────────────────────────
-        // Generic endpoint for external actors (like our Python agent) to call daemon tools
-        if (path === "/api/tools/execute" && req.method === "POST") {
-          const body = (await readBody(req)) as { tool: string; parameters: any };
-          const toolName = body.tool;
-          const parameters = body.parameters;
-
-          if (!toolName) return json(res, 400, { error: "tool name is required" });
-
-          const tool = ctx.tools.get(toolName);
-          if (!tool) return json(res, 404, { error: `Tool '${toolName}' not found` });
-
-          try {
-            logger.info(`Executing tool via API: ${toolName}`, { parameters });
-            const result = await (tool as any).execute(parameters, {
-              toolCallId: `api-${Date.now()}`,
-              messages: [],
+        if (text.startsWith("/workshop activate ")) {
+          if (!requireAdmin()) return;
+          const rest = text.slice("/workshop activate ".length).trim().replace(/"/g, "");
+          const [id, templateArg] = rest.split(/\s+/, 2);
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          const template = (templateArg?.trim() || (existing.template === "none" ? "llm-response" : existing.template)) as Parameters<typeof ctx.skills.activate>[1];
+          const updated = ctx.skills.activate(id, template);
+          if (!updated) {
+            return json(res, 200, {
+              response:
+                `Cannot activate \`${existing.name}\` from status **${existing.status}** with template \`${template}\`.\n` +
+                `Use approved/latent status and a non-\`none\` template.`,
+              sessionId,
             });
-            return json(res, 200, { ok: true, result });
-          } catch (e) {
-            logger.error(`API tool execution failed: ${toolName}`, { error: String(e) });
-            return json(res, 500, { error: String(e) });
+          }
+          return json(res, 200, {
+            response:
+              `⚡ Activated: **${updated.name}** (\`${updated.id}\`)\n` +
+              `Status: ${existing.status} → active\n` +
+              `Template: \`${updated.template}\`\n\n` +
+              `This skill is now executable when its triggers match.`,
+            sessionId,
+          });
+        }
+
+        if (text.startsWith("/workshop status ")) {
+          const id = text.slice("/workshop status ".length).trim().replace(/"/g, "");
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          return json(res, 200, {
+            response:
+              `**${existing.displayName}** (\`${existing.id}\`)\n` +
+              `- status: **${existing.status}**\n` +
+              `- template: \`${existing.template}\`\n` +
+              `- approvedAt: ${existing.approvedAt ?? "n/a"}\n` +
+              `- activatedAt: ${existing.activatedAt ?? "n/a"}`,
+            sessionId,
+          });
+        }
+
+        if (text.startsWith("/workshop latent ")) {
+          if (!requireAdmin()) return;
+          const id = text.slice("/workshop latent ".length).trim().replace(/"/g, "");
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          if (!["draft", "approved"].includes(existing.status)) return json(res, 200, { response: `Cannot mark \`${existing.name}\` as latent — current status is **${existing.status}**.`, sessionId });
+          const skill = ctx.skills.makeLatent(id)!;
+          return json(res, 200, { response: `💤 Marked latent: **${skill.name}** (\`${skill.id}\`)\nStatus: ${existing.status} → latent`, sessionId });
+        }
+
+        if (text.startsWith("/workshop deprecate ")) {
+          if (!requireAdmin()) return;
+          const id = text.slice("/workshop deprecate ".length).trim().replace(/"/g, "");
+          const existing = ctx.skills.get(id);
+          if (!existing) return json(res, 200, { response: `Skill not found: \`${id}\``, sessionId });
+          const skill = ctx.skills.deprecate(id)!;
+          return json(res, 200, { response: `🗑️ Deprecated: **${skill.name}** (\`${skill.id}\`)`, sessionId });
+        }
+
+        if (text === "/help") {
+          return json(res, 200, {
+            response: [
+              "**Slash commands available in chat:**",
+              "",
+              "`/whoami` — show your user ID and role",
+              "`/role set <userId> <administrator|user>` — assign role (admin only)",
+              "`/memory` — show profile facts with confidence levels",
+              "`/remember key = value` — store a protected memory fact",
+              "`/forget key` — delete a memory fact",
+              "`/forget all` — clear all profile memory",
+              "`/pad` — view Adam's scratchpad",
+              "`/pad clear` — clear the scratchpad",
+              "`/workshop` — list all skill specs",
+              "`/workshop show <id>` — view a skill spec",
+              "`/workshop approve <id>` — approve a draft skill",
+              "`/workshop activate <id> [template]` — activate approved/latent skill",
+              "`/workshop status <id>` — show real lifecycle/template state",
+              "`/workshop latent <id>` — mark a skill as latent",
+              "`/workshop deprecate <id>` — deprecate a skill",
+              "`/help` — show this list",
+            ].join("\n"), sessionId
+          });
+        }
+
+        if (text === "/whoami") {
+          return json(res, 200, {
+            response: `userId: \`${requestUserId}\`\nrole: **${requestRole}**`,
+            sessionId,
+          });
+        }
+
+        if (text.startsWith("/role set ")) {
+          if (!requireAdmin()) return;
+          const rest = text.slice("/role set ".length).trim();
+          const [targetUserId, role] = rest.split(/\s+/, 2);
+          if (!targetUserId || !role || !["administrator", "user"].includes(role)) {
+            return json(res, 200, { response: "Usage: /role set <userId> <administrator|user>", sessionId });
+          }
+          ctx.roles.setRole(targetUserId, role as UserRole);
+          return json(res, 200, {
+            response: `Updated role: \`${targetUserId}\` → **${ctx.roles.getRole(targetUserId)}**`,
+            sessionId,
+          });
+        }
+
+        // ── Active skill dispatch ─────────────────────────────────────────────
+        // If an active skill trigger matches, execute the skill template first.
+        const matchedSkill = findTriggeredActiveSkill(ctx.skills.list(), text);
+        if (matchedSkill) {
+          ctx.episodic.insert({
+            sessionId,
+            role: "user",
+            content: text,
+            source: "web",
+            taskId: undefined,
+            importance: 0.6,
+          });
+          const executed = await executeActiveSkill(ctx, matchedSkill, text, sessionId);
+          ctx.episodic.insert({
+            sessionId,
+            role: "assistant",
+            content: executed.response,
+            source: "internal",
+            taskId: undefined,
+            importance: 0.75,
+          });
+          return json(res, 200, {
+            response: executed.response,
+            sessionId,
+            metadata: executed.metadata,
+          });
+        }
+
+        // ── Normal agent message ────────────────────────────────────────────
+        const msg: InboundMessage = {
+          id: generateId(),
+          sessionId,
+          source: "web",
+          channelId: "web",
+          userId: "local-user",
+          role: "user",
+          content: text,
+          attachments: [],
+          receivedAt: new Date(),
+          metadata: {},
+        };
+
+        const result = await runWithSession(sessionId, () => ctx.agent.process(msg));
+        if (result.isErr()) return json(res, 500, { error: result.error.message });
+
+        const outbound = result.value;
+        let responseContent = outbound.content ?? "";
+
+        if (isBuildIntent) {
+          const snapshotAfter = collectFiles(evidenceRoots);
+          const created: string[] = [];
+          const modified: string[] = [];
+          for (const [pathAfter, metaAfter] of snapshotAfter.entries()) {
+            const before = snapshotBefore?.get(pathAfter);
+            if (!before) created.push(pathAfter);
+            else if (before.mtimeMs !== metaAfter.mtimeMs || before.size !== metaAfter.size) modified.push(pathAfter);
+          }
+          const completionClaimRegex = /\b(created|completed|done|implemented|set up|saved|finished|ready)\b/i;
+          const hasCompletionClaim = completionClaimRegex.test(responseContent);
+          const evidenceLines = [
+            "**Verification**",
+            `- workspace: ${workspaceRoot}`,
+            `- primary project root checked: ${projectRoot}`,
+            `- created files: ${created.length}`,
+            ...created.slice(0, 8).map((p) => `  - ${p}`),
+            `- modified files: ${modified.length}`,
+            ...modified.slice(0, 8).map((p) => `  - ${p}`),
+          ];
+
+          if (hasCompletionClaim && created.length === 0 && modified.length === 0) {
+            responseContent = [
+              "⚠️ Verification warning: I cannot confirm any file writes for this step.",
+              ...evidenceLines,
+              "",
+              "**Original model response:**",
+              responseContent,
+            ].join("\n");
+          } else {
+            responseContent = [
+              responseContent,
+              "",
+              ...evidenceLines,
+            ].join("\n");
           }
         }
 
-        // ── Static web UI ──────────────────────────────────────────────────────
-        serveStatic(res, path);
-      } catch (e: unknown) {
-        logger.error("API error", { path, error: String(e) });
-        json(res, 500, { error: "Internal server error" });
+        let audioBase64: string | undefined;
+
+        if (
+          outbound.voiceProfileId &&
+          ctx.config.voice?.enabled &&
+          responseContent
+        ) {
+          const profile = ctx.voiceRegistry.get(outbound.voiceProfileId);
+          if (profile) {
+            const { tmpdir } = await import("node:os");
+            const outputPath = join(tmpdir(), `adam-tts-web-${Date.now()}.mp3`);
+            const synth = await ctx.voiceOrchestrator.synthesize(
+              responseContent,
+              profile,
+              outputPath,
+            );
+            if (synth.isOk()) {
+              const { readFileSync, unlinkSync } = await import("node:fs");
+              try {
+                const buf = readFileSync(outputPath);
+                audioBase64 = buf.toString("base64");
+              } finally {
+                try {
+                  unlinkSync(outputPath);
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
+          }
+        }
+
+        const backgroundBase64 = ctx.chatBackgroundStore.get(sessionId);
+
+        return json(res, 200, {
+          response: responseContent,
+          sessionId,
+          ...(audioBase64 && { audioBase64 }),
+          ...(backgroundBase64 && { backgroundBase64 }),
+        });
       }
-    })();
+
+      // ── GET /api/chat/events/:sessionId ───────────────────────────────────
+      // Server-Sent Events (SSE) stream for real-time agent thoughts/tools
+      if (path.startsWith("/api/chat/events/") && req.method === "GET") {
+        const sessionId = path.slice("/api/chat/events/".length);
+        if (!sessionId) return json(res, 400, { error: "sessionId required" });
+
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+
+        const handler = (event: any) => {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        };
+
+        agentEventBus.onSessionEvent(sessionId, handler);
+
+        req.on("close", () => {
+          agentEventBus.offSessionEvent(sessionId, handler);
+        });
+        return;
+      }
+
+      // ── GET /api/chat/background ───────────────────────────────────────────
+      if (path === "/api/chat/background" && req.method === "GET") {
+        const sid = url.searchParams.get("sessionId");
+        if (!sid) return json(res, 400, { error: "sessionId required" });
+        const bg = ctx.chatBackgroundStore.get(sid);
+        if (!bg) return json(res, 404, { error: "No background for this session" });
+        return json(res, 200, { backgroundBase64: bg });
+      }
+
+      // ── GET /api/memory/profile ────────────────────────────────────────────
+      if (path === "/api/memory/profile" && req.method === "GET") {
+        return json(res, 200, { facts: ctx.profile.getAll() });
+      }
+
+      // ── DELETE /api/memory/profile/:key ───────────────────────────────────
+      if (path.startsWith("/api/memory/profile/") && req.method === "DELETE") {
+        const key = decodeURIComponent(path.slice("/api/memory/profile/".length));
+        ctx.profile.delete(key);
+        return json(res, 200, { ok: true });
+      }
+
+      // ── GET /api/memory/episodic ───────────────────────────────────────────
+      if (path === "/api/memory/episodic" && req.method === "GET") {
+        const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
+        const days = parseInt(url.searchParams.get("days") ?? "30", 10);
+        return json(res, 200, { entries: ctx.episodic.getRecentAcrossSessions(limit, days) });
+      }
+
+      // ── GET /api/config ────────────────────────────────────────────────────
+      if (path === "/api/config" && req.method === "GET") {
+        return json(res, 200, {
+          daemon: ctx.config.daemon,
+          discord: ctx.config.adapters.discord,
+          telegram: ctx.config.adapters.telegram,
+          budget: ctx.config.budget,
+        });
+      }
+
+      // ── PATCH /api/config/discord ──────────────────────────────────────────
+      if (path === "/api/config/discord" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const patch = (await readBody(req)) as Partial<DiscordAdapterConfig>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          adapters: {
+            ...ctx.config.adapters,
+            discord: { ...ctx.config.adapters.discord, ...patch },
+          },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        // Hot-reload the Discord adapter if it's running
+        if (ctx.discordAdapter) ctx.discordAdapter.updateConfig(updated.adapters.discord);
+        return json(res, 200, { ok: true, config: updated.adapters.discord });
+      }
+
+      // ── PATCH /api/config/daemon ───────────────────────────────────────────
+      if (path === "/api/config/daemon" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const patch = (await readBody(req)) as Partial<AdamConfig["daemon"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          daemon: { ...ctx.config.daemon, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        return json(res, 200, { ok: true, config: updated.daemon });
+      }
+
+      // ── PATCH /api/config/budget ───────────────────────────────────────────
+      if (path === "/api/config/budget" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const patch = (await readBody(req)) as Partial<AdamConfig["budget"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          budget: { ...ctx.config.budget, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        return json(res, 200, { ok: true, config: updated.budget });
+      }
+
+      // ── GET /api/config/memory ─────────────────────────────────────────────
+      if (path === "/api/config/memory" && req.method === "GET") {
+        return json(res, 200, { memory: ctx.config.memory });
+      }
+
+      // ── PATCH /api/config/memory ───────────────────────────────────────────
+      if (path === "/api/config/memory" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const patch = (await readBody(req)) as Partial<AdamConfig["memory"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          memory: { ...ctx.config.memory, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+        // Hot-reload consolidator parameters immediately
+        if (ctx.consolidator) ctx.consolidator.updateOptions(patch);
+        return json(res, 200, { ok: true, config: updated.memory });
+      }
+
+      // ── GET /api/vault/status ─────────────────────────────────────────────
+      if (path === "/api/vault/status" && req.method === "GET") {
+        const keys = [
+          "provider:anthropic:api-key",
+          "provider:openai:api-key",
+          "provider:google:api-key",
+          "provider:groq:api-key",
+          "provider:xai:api-key",
+          "provider:mistral:api-key",
+          "provider:deepseek:api-key",
+          "provider:openrouter:api-key",
+          "provider:qwen:api-key",
+          "provider:huggingface:api-key",
+          "adapter:discord:bot-token",
+          "adapter:telegram:bot-token",
+        ];
+        const status: Record<string, boolean> = {};
+        for (const key of keys) {
+          const r = await vault.get(key);
+          status[key] = r.isOk() && !!r.value;
+        }
+        return json(res, 200, { status });
+      }
+
+      // ── POST /api/vault/set ────────────────────────────────────────────────
+      if (path === "/api/vault/set" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as { key?: string; value?: string };
+        if (!body.key || typeof body.value !== "string") {
+          return json(res, 400, { error: "key and value are required" });
+        }
+        const trimmed = body.value.trim();
+        if (!trimmed) return json(res, 400, { error: "value cannot be empty" });
+        const r = await vault.set(body.key, trimmed);
+        if (r.isErr()) return json(res, 500, { error: r.error.message });
+        return json(res, 200, { ok: true });
+      }
+
+      // ── DELETE /api/vault/key ──────────────────────────────────────────────
+      if (path === "/api/vault/key" && req.method === "DELETE") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as { key?: string };
+        if (!body.key) return json(res, 400, { error: "key is required" });
+        const dr = await vault.delete(body.key);
+        if (dr.isErr()) return json(res, 500, { error: dr.error.message });
+        return json(res, 200, { ok: true });
+      }
+
+      // ── GET /api/config/providers ──────────────────────────────────────────
+      if (path === "/api/config/providers" && req.method === "GET") {
+        return json(res, 200, { providers: ctx.config.providers });
+      }
+
+      // ── PATCH /api/config/providers ────────────────────────────────────────
+      if (path === "/api/config/providers" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const patch = (await readBody(req)) as Partial<AdamConfig["providers"]>;
+        const updated: AdamConfig = {
+          ...ctx.config,
+          providers: { ...ctx.config.providers, ...patch },
+        };
+        const saveResult = saveConfig(updated);
+        if (saveResult.isErr()) return json(res, 500, { error: saveResult.error.message });
+        ctx.config = updated;
+
+        // Rebuild the model pool from the new config so the change takes effect
+        // immediately — no restart required.
+        const newPool = await buildModelPool(updated);
+        ctx.router.replaceRegistry(new ProviderRegistry(newPool));
+        logger.info("Model pool hot-reloaded after provider config change");
+
+        return json(res, 200, { ok: true, providers: updated.providers });
+      }
+
+      // ── GET /api/personality ───────────────────────────────────────────────
+      if (path === "/api/personality" && req.method === "GET") {
+        return json(res, 200, {
+          content: ctx.personality.loadOrSeed(),
+          path: ctx.personality.path,
+        });
+      }
+
+      // ── PATCH /api/personality ─────────────────────────────────────────────
+      if (path === "/api/personality" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as { content?: string };
+        if (typeof body.content !== "string" || !body.content.trim()) {
+          return json(res, 400, { error: "content is required" });
+        }
+        ctx.personality.save(body.content);
+        return json(res, 200, { ok: true, content: ctx.personality.load() });
+      }
+
+      // ── POST /api/personality/reset ────────────────────────────────────────
+      if (path === "/api/personality/reset" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        ctx.personality.reset();
+        return json(res, 200, { ok: true, content: ctx.personality.load() });
+      }
+
+      // ── GET /api/scratchpad ────────────────────────────────────────────────
+      if (path === "/api/scratchpad" && req.method === "GET") {
+        return json(res, 200, {
+          content: ctx.scratchpad.load(),
+          lastModified: ctx.scratchpad.lastModified()?.toISOString() ?? null,
+          path: ctx.scratchpad.path,
+        });
+      }
+
+      // ── PATCH /api/scratchpad ──────────────────────────────────────────────
+      if (path === "/api/scratchpad" && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as { content?: string };
+        if (typeof body.content !== "string") {
+          return json(res, 400, { error: "content is required" });
+        }
+        ctx.scratchpad.save(body.content);
+        return json(res, 200, { ok: true, lastModified: ctx.scratchpad.lastModified()?.toISOString() });
+      }
+
+      // ── DELETE /api/scratchpad ─────────────────────────────────────────────
+      if (path === "/api/scratchpad" && req.method === "DELETE") {
+        if (!requireAdmin()) return;
+        const { unlinkSync, existsSync } = await import("node:fs");
+        if (existsSync(ctx.scratchpad.path)) unlinkSync(ctx.scratchpad.path);
+        return json(res, 200, { ok: true });
+      }
+
+      // ── GET /api/skills ────────────────────────────────────────────────────
+      if (path === "/api/skills" && req.method === "GET") {
+        return json(res, 200, { skills: ctx.skills.list() });
+      }
+
+      // ── GET /api/skills/:id ────────────────────────────────────────────────
+      if (path.startsWith("/api/skills/") && req.method === "GET" && !path.includes("/action/")) {
+        const id = path.slice("/api/skills/".length);
+        const skill = ctx.skills.get(id);
+        if (!skill) return json(res, 404, { error: "Skill not found" });
+        return json(res, 200, { skill });
+      }
+
+      // ── PATCH /api/skills/:id ──────────────────────────────────────────────
+      if (path.startsWith("/api/skills/") && req.method === "PATCH" && !path.includes("/action/")) {
+        if (!requireAdmin()) return;
+        const id = path.slice("/api/skills/".length);
+        const skill = ctx.skills.get(id);
+        if (!skill) return json(res, 404, { error: "Skill not found" });
+        const patch = (await readBody(req)) as Partial<typeof skill>;
+        // Only allow editing notes and steps on drafts — status changes go through actions
+        if (skill.status === "draft") {
+          if (patch.notes !== undefined) skill.notes = patch.notes;
+          if (patch.steps !== undefined) skill.steps = patch.steps;
+          if (patch.constraints !== undefined) skill.constraints = patch.constraints;
+          if (patch.successCriteria !== undefined) skill.successCriteria = patch.successCriteria;
+        }
+        ctx.skills.save(skill);
+        return json(res, 200, { ok: true, skill });
+      }
+
+      // ── DELETE /api/skills/:id ─────────────────────────────────────────────
+      if (path.startsWith("/api/skills/") && req.method === "DELETE" && !path.includes("/action/")) {
+        if (!requireAdmin()) return;
+        const id = path.slice("/api/skills/".length);
+        const deleted = ctx.skills.delete(id);
+        return json(res, deleted ? 200 : 404, { ok: deleted });
+      }
+
+      // ── POST /api/skills/:id/action/:action ────────────────────────────────
+      // Lifecycle transitions — these are the only gates to status changes
+      if (path.startsWith("/api/skills/") && path.includes("/action/") && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const parts = path.split("/");
+        const id = parts[3];
+        const action = parts[5];
+        let updated = null;
+
+        if (action === "approve") updated = ctx.skills.approve(id);
+        else if (action === "latent") updated = ctx.skills.makeLatent(id);
+        else if (action === "deprecate") updated = ctx.skills.deprecate(id);
+        else if (action === "activate") {
+          const body = (await readBody(req)) as { template?: string };
+          const template = (body.template ?? "none") as Parameters<typeof ctx.skills.activate>[1];
+          updated = ctx.skills.activate(id, template);
+        }
+
+        if (!updated) return json(res, 400, { error: `Cannot apply action '${action}' to this skill in its current state` });
+        return json(res, 200, { ok: true, skill: updated });
+      }
+
+      // ── GET /api/voices ──────────────────────────────────────────────────────
+      if (path === "/api/voices" && req.method === "GET") {
+        const profiles = ctx.voiceRegistry.list();
+        return json(res, 200, {
+          voices: profiles.map((p) => ({
+            ...p,
+            createdAt: p.createdAt.toISOString(),
+            updatedAt: p.updatedAt.toISOString(),
+          })),
+        });
+      }
+
+      // ── GET /api/voices/edge ────────────────────────────────────────────────
+      if (path === "/api/voices/edge" && req.method === "GET") {
+        const options = await ctx.voiceOrchestrator.listEdgeVoices();
+        return json(res, 200, { voices: options });
+      }
+
+      // ── POST /api/voices ─────────────────────────────────────────────────────
+      if (path === "/api/voices" && req.method === "POST") {
+        if (!requireAdmin()) return;
+        const body = (await readBody(req)) as {
+          name: string;
+          description?: string;
+          provider: "edge" | "lux" | "xtts";
+          providerConfig: unknown;
+          persona?: string;
+          isDefault?: boolean;
+        };
+        if (!body.name || !body.provider || !body.providerConfig) {
+          return json(res, 400, { error: "name, provider, and providerConfig are required" });
+        }
+        const result = ctx.voiceRegistry.create({
+          name: body.name,
+          description: body.description ?? "",
+          provider: body.provider,
+          providerConfig: body.providerConfig as { voiceId?: string; referenceAudioPath?: string; params?: unknown; language?: string },
+          persona: body.persona ?? "",
+          isDefault: body.isDefault ?? false,
+        });
+        if (result.isErr()) return json(res, 400, { error: result.error.message });
+        const profile = result.value;
+        return json(res, 201, {
+          voice: {
+            ...profile,
+            createdAt: profile.createdAt.toISOString(),
+            updatedAt: profile.updatedAt.toISOString(),
+          },
+        });
+      }
+
+      // ── GET /api/voices/:id ─────────────────────────────────────────────────
+      if (path.startsWith("/api/voices/") && req.method === "GET") {
+        const id = path.slice("/api/voices/".length);
+        if (id === "edge") return; // already handled above
+        const profile = ctx.voiceRegistry.get(id);
+        if (!profile) return json(res, 404, { error: "Voice not found" });
+        return json(res, 200, {
+          voice: {
+            ...profile,
+            createdAt: profile.createdAt.toISOString(),
+            updatedAt: profile.updatedAt.toISOString(),
+          },
+        });
+      }
+
+      // ── PATCH /api/voices/:id ───────────────────────────────────────────────
+      if (path.startsWith("/api/voices/") && req.method === "PATCH") {
+        if (!requireAdmin()) return;
+        const id = path.slice("/api/voices/".length);
+        const body = (await readBody(req)) as Partial<{
+          name: string;
+          description: string;
+          provider: "edge" | "lux" | "xtts";
+          providerConfig: unknown;
+          persona: string;
+          isDefault: boolean;
+        }>;
+        const result = ctx.voiceRegistry.update(id, body);
+        if (result.isErr()) return json(res, result.error.code === "voice-registry:not-found" ? 404 : 400, { error: result.error.message });
+        const profile = result.value;
+        return json(res, 200, {
+          voice: {
+            ...profile,
+            createdAt: profile.createdAt.toISOString(),
+            updatedAt: profile.updatedAt.toISOString(),
+          },
+        });
+      }
+
+      // ── DELETE /api/voices/:id ───────────────────────────────────────────────
+      if (path.startsWith("/api/voices/") && req.method === "DELETE") {
+        if (!requireAdmin()) return;
+        const id = path.slice("/api/voices/".length);
+        const result = ctx.voiceRegistry.delete(id);
+        if (result.isErr()) return json(res, 400, { error: result.error.message });
+        return json(res, 200, { ok: true });
+      }
+
+      // ── POST /api/voices/synthesize ──────────────────────────────────────────
+      if (path === "/api/voices/synthesize" && req.method === "POST") {
+        const body = (await readBody(req)) as { text: string; voiceProfileId: string; format?: "path" | "base64" };
+        if (!body.text || !body.voiceProfileId) {
+          return json(res, 400, { error: "text and voiceProfileId are required" });
+        }
+        const profile = ctx.voiceRegistry.get(body.voiceProfileId);
+        if (!profile) return json(res, 404, { error: "Voice profile not found" });
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const { readFileSync, unlinkSync, existsSync } = await import("node:fs");
+        const outputPath = join(tmpdir(), `adam-tts-${Date.now()}.mp3`);
+        const result = await ctx.voiceOrchestrator.synthesize(body.text, profile, outputPath);
+        if (result.isErr()) return json(res, 500, { error: result.error.message });
+        const synth = result.value;
+        const payload: Record<string, unknown> = {
+          audioPath: synth.audioPath,
+          durationMs: synth.durationMs,
+          sampleRate: synth.sampleRate,
+          generatedAt: synth.generatedAt.toISOString(),
+        };
+        if (body.format === "base64") {
+          try {
+            const buf = readFileSync(synth.audioPath);
+            payload.audioBase64 = buf.toString("base64");
+            if (existsSync(synth.audioPath)) unlinkSync(synth.audioPath);
+          } catch {
+            // fallback: still return path
+          }
+        }
+        return json(res, 200, payload);
+      }
+
+      // ── Static web UI ──────────────────────────────────────────────────────
+      serveStatic(res, path);
+    } catch (e: unknown) {
+      const errorDetails = e instanceof Error ? {
+        message: e.message,
+        stack: e.stack,
+        ...(e as any)
+      } : String(e);
+      logger.error("API error", { path, error: errorDetails });
+      json(res, 500, {
+        error: "Internal server error",
+        message: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined
+      });
+    }
   });
 }
 
 // ── Model pool builder ────────────────────────────────────────────────────────
 
 async function buildModelPool(config: AdamConfig): Promise<ModelPoolConfig> {
-  const fast: ProviderConfig[] = [];
-  const capable: ProviderConfig[] = [];
-  const coder: ProviderConfig[] = [];
-
-  const cloudProviders = [
-    "anthropic", "openai", "google", "groq", "xai", "mistral", "deepseek", "openrouter", "qwen",
-  ] as const;
-
-  for (const name of cloudProviders) {
-    const providerCfg = config.providers[name];
-    if (!providerCfg.enabled) continue;
-    const keyResult = await vault.get(`provider:${name}:api-key`);
-    const apiKey = keyResult.isOk() && keyResult.value ? keyResult.value : null;
-    if (!apiKey) { logger.warn(`${name}: enabled but no API key — skipping`); continue; }
-    const models = providerCfg.defaultModels;
-    if (models.fast) fast.push({ type: "cloud", provider: name, model: models.fast, apiKey });
-    if (models.capable) capable.push({ type: "cloud", provider: name, model: models.capable, apiKey });
-  }
-
-  if (config.providers.ollama.enabled) {
-    const { models, baseUrl } = config.providers.ollama;
-    fast.push({ type: "local", provider: "ollama", model: models.fast, baseUrl });
-    capable.push({ type: "local", provider: "ollama", model: models.capable, baseUrl });
-    // Dedicated coder model — routes code_write/edit/scaffold tools
-    if (models.coder) {
-      coder.push({ type: "local", provider: "ollama", model: models.coder, baseUrl });
-    }
-  }
-  if (config.providers.lmstudio.enabled) {
-    const { models, baseUrl } = config.providers.lmstudio;
-    fast.push({ type: "local", provider: "lmstudio", model: models.fast, baseUrl });
-    capable.push({ type: "local", provider: "lmstudio", model: models.capable, baseUrl });
-  }
-  if (config.providers.vllm.enabled) {
-    const { models, baseUrl } = config.providers.vllm;
-    fast.push({ type: "local", provider: "vllm", model: models.fast, baseUrl });
-    capable.push({ type: "local", provider: "vllm", model: models.capable, baseUrl });
-  }
-  if (config.providers.huggingface.enabled) {
-    const hfKeyResult = await vault.get("provider:huggingface:api-key");
-    const hfKey = hfKeyResult.isOk() && hfKeyResult.value ? hfKeyResult.value : undefined;
-    if (config.providers.huggingface.inferenceApiModel) {
-      capable.push({
-        type: "huggingface", mode: "inference-api",
-        model: config.providers.huggingface.inferenceApiModel,
-        ...(hfKey !== undefined ? { apiKey: hfKey } : {}),
-      });
-    }
-  }
-
-  return {
-    fast, capable, coder,
-    embedding: [{ type: "huggingface", mode: "transformers", model: config.providers.huggingface.embeddingModel }],
-  };
+  return buildPool(config, vault);
 }
 
 // ── Adapter builder ───────────────────────────────────────────────────────────
@@ -1204,14 +2802,14 @@ async function buildAdapters(config: AdamConfig): Promise<AdapterBundle> {
 
   if (config.adapters.telegram.enabled) {
     const keyResult = await vault.get("adapter:telegram:bot-token");
-    const token = keyResult.isOk() && keyResult.value ? keyResult.value : "";
+    const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
     if (!token) logger.warn("Telegram: enabled but no token — skipping");
     else { adapters.push(new TelegramAdapter(token)); logger.info("Telegram adapter ready"); }
   }
 
   if (config.adapters.discord.enabled) {
     const keyResult = await vault.get("adapter:discord:bot-token");
-    const token = keyResult.isOk() && keyResult.value ? keyResult.value : "";
+    const token = keyResult.isOk() && keyResult.value ? keyResult.value : null;
     if (!token) logger.warn("Discord: enabled but no token — skipping");
     else {
       discordAdapter = new DiscordAdapter(token, config.adapters.discord);
@@ -1259,6 +2857,13 @@ What you are:
 - You have a web dashboard at http://localhost:${config.daemon.port}
 - Your workspace directory is: ${workspace} — ALL projects, apps, and files you create go here unless the user specifies otherwise. Always use absolute paths under this directory. Never use relative paths.
 
+Request intent framework — every message is classified. Adapt your response:
+- BRAINSTORMING: User wants to explore ideas, generate options, think out loud. Focus on ideation — do NOT jump to implementation. No code, no tools unless explicitly asked. Explore together.
+- BUILD: User wants to create or implement. Ready for tools, code, execution.
+- RESEARCH: User wants to learn, gather information, explore. Focus on finding and synthesizing.
+- SKILL DEVELOPMENT: User wants to design or adapt a new capability for you. Focus on the skill spec — triggers, inputs, constraints. Say "let's design a skill" to enter workshop mode.
+- GENERAL: Conversational or mixed. Respond normally.
+
 Personality:
 - You are direct. No filler, no "certainly!", no "great question!", no "I'd be happy to help with that". Just say the thing.
 - You have opinions. If something is a bad idea, say so. If there's a better way, say so.
@@ -1291,7 +2896,10 @@ Browser tools — a real visible Chromium browser that runs on this machine:
 - browser_back: go back in browser history
 - browser_new_tab: open a new browser tab
 - browser_close: close the browser when done
+- create_suno_song: opens Suno in browser, enters description, clicks Create. Returns success/message only — you do NOT get or save the MP3. Suno generates in the browser; user downloads from Suno. Never claim a file path for Suno output.
+${config.providers.xai?.enabled || config.providers.openai?.enabled ? `- generate_chat_background: generate a new background image for the web chat. Use when the user asks to change the background, set a mood, or create a visual atmosphere. You are responsible for the chat's visual environment.` : ""}
 IMPORTANT: Always use browser tools when the user asks to "browse", "look up", "open a site", "navigate to", or when web_fetch would not work (JS-heavy pages, logins, etc.).
+CRITICAL for Suno: When the user asks to create a song, make a song on Suno, or open Suno — you MUST call create_suno_song. Do NOT respond with text only. The tool opens a real browser; if you don't call it, nothing happens. Never claim you created a song without having called the tool.
 
 Code tools — your division of labor with a local code model:
 You are the senior engineer / tech lead. You decide WHAT to build and WHY. You never write raw implementation code yourself.
@@ -1303,6 +2911,13 @@ The local code model is the fast, tireless junior — it implements exactly what
 When building software: use code_scaffold or code_write_file to create files, shell to run commands, code_review to verify correctness.
 Never write code yourself in the response when you can use these tools to have it implemented directly.
 
+Build job tools — supervised engineering pipeline (runs in background):
+- spawn_build_job: start a job with a goal (e.g. "add tool X", "fix type error"). Returns jobId. Job runs: checkout → deps → analyze → patch → build → test.
+- get_build_job_status: check progress. Omit jobId for active job.
+- cancel_build_job: request cancellation.
+- summarize_build_job: get a narrative summary of what happened.
+Use spawn_build_job when the user wants you to update the codebase and you prefer a supervised pipeline over direct code tools.
+
 Rules for tool use:
 - ALWAYS attempt a task with your tools before concluding you cannot do it
 - Never say "I can't access X" — try read_file or list_directory first
@@ -1310,7 +2925,13 @@ Rules for tool use:
 - Never tell the user to do something you can do with a tool. Do it yourself.
 - If a tool call fails, report the actual error — not a vague "I can't"
 - Confirm before destructive actions (overwriting files, running shell commands that modify state)
-- No confirmation needed for read-only actions (reading files, listing directories, fetching URLs)`;
+- No confirmation needed for read-only actions (reading files, listing directories, fetching URLs)
+
+CRITICAL — never hallucinate success:
+- Before claiming you created a file, VERIFY it exists: use read_file or list_directory to confirm. If it's not there, say so and offer to retry.
+- Report tool results accurately. If a tool returns an error or success: false, say that. Never invent success.
+- For create_suno_song: you MUST call the tool — it opens a browser. You do NOT save the MP3. Suno generates in the browser. Tell the user to check the browser and download from Suno. Never claim a file path. If the tool returns success: false, report the error to the user.
+- If something failed, say "There was an issue" and offer to try again. Do not pretend it worked.`;
 }
 
 function resolveWorkspace(config: AdamConfig): string {

@@ -39,6 +39,15 @@ export const InboundMessageSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
+/**
+ * InboundMessage metadata can include:
+ * - isPrivileged: boolean (if true, the user is an admin for this source)
+ * - username: string
+ * - guildId: string
+ * - messageId: string
+ * - systemPromptOverride: string
+ * - slashCommand: boolean
+ */
 export type InboundMessage = z.infer<typeof InboundMessageSchema>;
 
 export const OutboundMessageSchema = z.object({
@@ -49,6 +58,7 @@ export const OutboundMessageSchema = z.object({
   voiceProfileId: z.string().uuid().nullable().default(null),
   replyToId: z.string().nullable().default(null),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  attachments: z.array(z.string()).optional(),
 });
 
 export type OutboundMessage = z.infer<typeof OutboundMessageSchema>;

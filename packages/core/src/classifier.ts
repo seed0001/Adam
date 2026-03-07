@@ -50,7 +50,7 @@ export type ClassificationResult = {
  * before spending on a planner call.
  */
 export class IntentClassifier {
-  constructor(private router: ModelRouter) {}
+  constructor(private router: ModelRouter) { }
 
   async classify(
     input: string,
@@ -67,16 +67,46 @@ export class IntentClassifier {
       schemaName: "TaskClassification",
     });
 
-    if (result.isErr()) return err(result.error);
+    if (result.isOk()) {
+      const { complexity, intent, requiresPlanning, suggestedTier } = result.value;
+      logger.debug("Classification result (structured)", { complexity, intent, requiresPlanning });
+      return ok({
+        complexity,
+        intent: intent ?? "general",
+        requiresPlanning,
+        tier: suggestedTier as ModelTier,
+      });
+    }
 
-    const { complexity, intent, requiresPlanning, suggestedTier } = result.value;
-    logger.debug("Classification result", { complexity, intent, requiresPlanning });
+    // Fallback: the model likely doesn't support JSON mode or Tool calling (common for local models)
+    logger.warn("Classification failed structured output, attempting text fallback", { error: result.error.message });
 
-    return ok({
-      complexity,
-      intent: intent ?? "general",
-      requiresPlanning,
-      tier: suggestedTier as ModelTier,
+    const fallbackResult = await this.router.generate({
+      sessionId,
+      tier: "fast",
+      system: CLASSIFICATION_SYSTEM + "\n\nIMPORTANT: Output ONLY the raw JSON object, no other text or explanation.",
+      prompt: input,
     });
+
+    if (fallbackResult.isErr()) return err(fallbackResult.error);
+
+    try {
+      const jsonMatch = fallbackResult.value.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No JSON object found in response");
+
+      const parsed = ClassificationSchema.parse(JSON.parse(jsonMatch[0]));
+      logger.debug("Classification result (parsed fallback)", { complexity: parsed.complexity, intent: parsed.intent });
+
+      return ok({
+        complexity: parsed.complexity,
+        intent: (parsed.intent as RequestIntent) ?? "general",
+        requiresPlanning: parsed.requiresPlanning,
+        tier: (parsed.suggestedTier as ModelTier) ?? "fast",
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.error("Failed to parse classification fallback", { error: msg, raw: fallbackResult.value });
+      return err(adamError("core:classifier-failed", `Classification failed: ${msg}`, e));
+    }
   }
 }

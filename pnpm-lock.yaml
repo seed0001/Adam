@@ -256,6 +256,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@adam/diagnostics':
+        specifier: workspace:*
+        version: link:../diagnostics
       '@adam/memory':
         specifier: workspace:*
         version: link:../memory

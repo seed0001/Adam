@@ -58,12 +58,18 @@ export class Planner {
   constructor(
     private router: ModelRouter,
     private availableTools: string[] = [],
-  ) {}
+  ) { }
 
-  async plan(goal: string, sessionId: string, intent?: RequestIntent): Promise<Result<TaskGraph, AdamError>> {
+  async plan(
+    goal: string,
+    sessionId: string,
+    toolNames?: string[],
+    intent?: RequestIntent,
+  ): Promise<Result<TaskGraph, AdamError>> {
     logger.info("Planning task graph", { goalLength: goal.length, intent });
 
-    const system = buildPlannerSystem(this.availableTools);
+    const toolsToUse = toolNames ?? this.availableTools;
+    const system = buildPlannerSystem(toolsToUse);
 
     let prompt = `Goal: ${goal}`;
     if (intent === "brainstorming") {
@@ -89,7 +95,7 @@ export class Planner {
     const now = new Date();
     const graphId = generateId();
 
-    const validTools = new Set(this.availableTools);
+    const validTools = new Set(toolsToUse);
     const tasks: Task[] = rawTasks.map((t) => {
       const requestedTools = t.tools ?? [];
       const toolCalls = requestedTools.filter((name) => validTools.has(name));
@@ -98,25 +104,26 @@ export class Planner {
         logger.warn("Planner requested invalid tools, filtering out", { invalid, taskId: t.id });
       }
       return {
-      id: t.id,
-      parentId: null,
-      sessionId,
-      description: t.description,
-      complexity: "simple" as const,
-      priority: "normal" as const,
-      status: "pending" as const,
-      dependsOn: t.dependsOn ?? [],
-      input: {},
-      output: null,
-      error: null,
-      toolCalls,
-      modelTier: (t.modelTier ?? "capable") as "fast" | "capable" | "embedding",
-      createdAt: now,
-      startedAt: null,
-      finishedAt: null,
-      retryCount: 0,
-      maxRetries: 2,
-    };
+        id: t.id,
+        parentId: null,
+        sessionId,
+        description: t.description,
+        complexity: "simple" as const,
+        priority: "normal" as const,
+        status: "pending" as const,
+        dependsOn: t.dependsOn ?? [],
+        input: {},
+        output: null,
+        error: null,
+        errorContext: null,
+        toolCalls,
+        modelTier: (t.modelTier ?? "capable") as "fast" | "capable" | "embedding",
+        createdAt: now,
+        startedAt: null,
+        finishedAt: null,
+        retryCount: 0,
+        maxRetries: 2,
+      };
     });
 
     const validationResult = this.validateDAG(tasks);

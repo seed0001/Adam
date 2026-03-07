@@ -68,10 +68,43 @@ function runMigrations(sqlite: BetterSQLite3.Database): void {
       metadata         TEXT DEFAULT '{}'
     );
 
+    CREATE TABLE IF NOT EXISTS patches (
+      id         TEXT PRIMARY KEY,
+      source     TEXT NOT NULL,
+      task_id    TEXT,
+      file_path  TEXT NOT NULL,
+      diff       TEXT NOT NULL,
+      rationale  TEXT NOT NULL,
+      status     TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','approved','rejected','applied')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS feedback (
+      id          TEXT PRIMARY KEY,
+      type        TEXT NOT NULL CHECK(type IN ('positive','negative','neutral')),
+      category    TEXT NOT NULL,
+      observation TEXT NOT NULL,
+      impact      TEXT NOT NULL DEFAULT 'medium' CHECK(impact IN ('high','medium','low')),
+      trait       TEXT,
+      is_golden   INTEGER NOT NULL DEFAULT 0,
+      session_id  TEXT,
+      task_id     TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS traits (
+      name       TEXT PRIMARY KEY,
+      score      INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_episodic_session  ON episodic_memory(session_id);
     CREATE INDEX IF NOT EXISTS idx_episodic_created  ON episodic_memory(created_at);
     CREATE INDEX IF NOT EXISTS idx_profile_key       ON profile_memory(key);
     CREATE INDEX IF NOT EXISTS idx_sessions_source   ON sessions(source);
+    CREATE INDEX IF NOT EXISTS idx_patches_status    ON patches(status);
+    CREATE INDEX IF NOT EXISTS idx_feedback_type     ON feedback(type);
   `);
 
   // Additive migrations — safe to run repeatedly (SQLite ignores duplicate columns via try/catch)

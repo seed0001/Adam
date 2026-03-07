@@ -39,10 +39,44 @@ export async function buildModelPool(
 
   if (config.providers.ollama.enabled) {
     const { models, baseUrl } = config.providers.ollama;
-    fast.push({ type: "local", provider: "ollama", model: models.fast, baseUrl });
-    capable.push({ type: "local", provider: "ollama", model: models.capable, baseUrl });
-    if (models.coder) {
-      coder.push({ type: "local", provider: "ollama", model: models.coder, baseUrl });
+    const effectiveBaseUrl = baseUrl || "http://localhost:11434";
+
+    // Auto-discovery: If use hasn't changed defaults, try to see if they're actually there.
+    // Small local models are often missing from fresh installs.
+    try {
+      const response = await fetch(`${effectiveBaseUrl}/api/tags`);
+      if (response.ok) {
+        const data = (await response.json()) as { models: Array<{ name: string }> };
+        const available = data.models.map(m => m.name);
+
+        const register = (tier: string, configured: string | undefined, target: ProviderConfig[]) => {
+          if (!configured) return;
+          // If configured model exists, or if the user explicitly changed it from default, use it.
+          // Otherwise, if default is missing, pick the first available.
+          const isDefault = configured === "llama3.2:1b" || configured === "llama3.2";
+          if (available.includes(configured) || (!isDefault && configured !== "")) {
+            target.push({ type: "local", provider: "ollama", model: configured, baseUrl: effectiveBaseUrl });
+          } else if (available.length > 0) {
+            const fallback = available[0]!;
+            target.push({ type: "local", provider: "ollama", model: fallback, baseUrl: effectiveBaseUrl });
+          }
+        };
+
+        register("fast", models.fast, fast);
+        register("capable", models.capable, capable);
+        if (models.coder) {
+          register("coder", models.coder, coder);
+        }
+      } else {
+        throw new Error(`Ollama status: ${response.status}`);
+      }
+    } catch (e) {
+      // Fallback to static config if discovery fails
+      fast.push({ type: "local", provider: "ollama", model: models.fast, baseUrl });
+      capable.push({ type: "local", provider: "ollama", model: models.capable, baseUrl });
+      if (models.coder) {
+        coder.push({ type: "local", provider: "ollama", model: models.coder, baseUrl });
+      }
     }
   }
   if (config.providers.lmstudio.enabled) {

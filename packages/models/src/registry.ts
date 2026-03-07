@@ -19,21 +19,25 @@ import {
   type HuggingFaceMode,
   type AdamError,
   type Result,
+  createLogger,
   ok,
   err,
   adamError,
 } from "@adam/shared";
 
+
+const logger = createLogger("models:registry");
+
 export type ProviderConfig =
   | { type: "cloud"; provider: CloudProvider; model: string; apiKey: string }
   | { type: "local"; provider: LocalProvider; model: string; baseUrl?: string }
   | {
-      type: "huggingface";
-      mode: HuggingFaceMode;
-      model: string;
-      apiKey?: string;
-      baseUrl?: string;
-    };
+    type: "huggingface";
+    mode: HuggingFaceMode;
+    model: string;
+    apiKey?: string;
+    baseUrl?: string;
+  };
 
 export type CloudProvider =
   | "anthropic"
@@ -65,7 +69,7 @@ export type ModelPoolConfig = {
  * is actually being called. Everything else speaks only LanguageModel.
  */
 export class ProviderRegistry {
-  constructor(private pool: ModelPoolConfig) {}
+  constructor(private pool: ModelPoolConfig) { }
 
   /** Returns the current pool — reflects what was actually loaded and vault-verified at build time. */
   getPool(): ModelPoolConfig {
@@ -73,24 +77,37 @@ export class ProviderRegistry {
   }
 
   resolveLanguageModel(tier: ModelTier): Result<LanguageModel, AdamError> {
-    let configs: ProviderConfig[];
+    const results = this.resolveLanguageModels(tier);
+    if (results.length > 0) return ok(results[0]);
+    return err(adamError("registry:no-model", `No model available for tier '${tier}'`));
+  }
+
+  resolveLanguageModels(tier: ModelTier): LanguageModel[] {
+    let configs: ProviderConfig[] = [];
 
     if (tier === "embedding") {
-      configs = this.pool.capable;
+      configs = this.pool.embedding || [];
     } else if (tier === "coder") {
-      // Use dedicated coder pool if configured; fall back to capable so this
-      // always resolves even when no local coder model is installed.
       configs = this.pool.coder.length > 0 ? this.pool.coder : this.pool.capable;
+    } else if (tier === "fast") {
+      configs = [...(this.pool.fast || []), ...(this.pool.capable || [])];
     } else {
-      configs = this.pool[tier];
+      configs = this.pool[tier] || [];
     }
 
+    const models: LanguageModel[] = [];
     for (const config of configs) {
       const result = this.buildLanguageModel(config);
-      if (result.isOk()) return result;
+      if (result.isOk()) {
+        models.push(result.value);
+      }
     }
 
-    return err(adamError("registry:no-model", `No model available for tier '${tier}'`));
+    logger.debug(`Resolved ${models.length} models for tier ${tier}`, {
+      models: models.map(m => m.modelId)
+    });
+
+    return models;
   }
 
   resolveEmbeddingModel(): Result<EmbeddingModel<string>, AdamError> {

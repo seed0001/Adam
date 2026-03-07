@@ -47,6 +47,7 @@ export class TaskQueue {
         input       TEXT NOT NULL DEFAULT '{}',
         output      TEXT,
         error       TEXT,
+        error_context TEXT,
         tool_calls  TEXT NOT NULL DEFAULT '[]',
         model_tier  TEXT NOT NULL DEFAULT 'capable',
         created_at  TEXT NOT NULL,
@@ -56,6 +57,44 @@ export class TaskQueue {
         max_retries INTEGER NOT NULL DEFAULT 2,
         FOREIGN KEY (graph_id) REFERENCES task_graphs(id)
       );
+
+      -- Add error_context column if it doesn't exist (migration for existing DBs)
+      PRAGMA foreign_keys=OFF;
+      BEGIN TRANSACTION;
+      CREATE TABLE IF NOT EXISTS tasks_new (
+        id          TEXT PRIMARY KEY,
+        graph_id    TEXT NOT NULL,
+        parent_id   TEXT,
+        session_id  TEXT NOT NULL,
+        description TEXT NOT NULL,
+        complexity  TEXT NOT NULL DEFAULT 'simple',
+        priority    TEXT NOT NULL DEFAULT 'normal',
+        status      TEXT NOT NULL DEFAULT 'pending',
+        depends_on  TEXT NOT NULL DEFAULT '[]',
+        input       TEXT NOT NULL DEFAULT '{}',
+        output      TEXT,
+        error       TEXT,
+        error_context TEXT,
+        tool_calls  TEXT NOT NULL DEFAULT '[]',
+        model_tier  TEXT NOT NULL DEFAULT 'capable',
+        created_at  TEXT NOT NULL,
+        started_at  TEXT,
+        finished_at TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        max_retries INTEGER NOT NULL DEFAULT 2,
+        FOREIGN KEY (graph_id) REFERENCES task_graphs(id)
+      );
+      INSERT OR IGNORE INTO tasks_new 
+        (id, graph_id, parent_id, session_id, description, complexity, priority, status, 
+         depends_on, input, output, error, tool_calls, model_tier, created_at, started_at, finished_at, retry_count, max_retries)
+      SELECT 
+        id, graph_id, parent_id, session_id, description, complexity, priority, status, 
+         depends_on, input, output, error, tool_calls, model_tier, created_at, started_at, finished_at, retry_count, max_retries
+      FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_new RENAME TO tasks;
+      COMMIT;
+      PRAGMA foreign_keys=ON;
 
       CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
       CREATE INDEX IF NOT EXISTS tasks_session ON tasks(session_id);
@@ -82,8 +121,8 @@ export class TaskQueue {
       const insertTask = this.db.prepare(`
         INSERT OR REPLACE INTO tasks
         (id, graph_id, parent_id, session_id, description, complexity, priority, status,
-         depends_on, input, output, error, tool_calls, model_tier, created_at, retry_count, max_retries)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         depends_on, input, output, error, error_context, tool_calls, model_tier, created_at, retry_count, max_retries)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       const enqueue = this.db.transaction(() => {
@@ -107,6 +146,8 @@ export class TaskQueue {
             task.status,
             JSON.stringify(task.dependsOn),
             JSON.stringify(task.input),
+            null,
+            null,
             null,
             null,
             JSON.stringify(task.toolCalls),
@@ -143,6 +184,13 @@ export class TaskQueue {
     return rows.map(rowToTask);
   }
 
+  getFailedTasks(graphId: string): Task[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM tasks WHERE graph_id = ? AND status = 'failed'`)
+      .all(graphId) as Array<Record<string, unknown>>;
+    return rows.map(rowToTask);
+  }
+
   markRunning(taskId: string): Result<void, AdamError> {
     return trySync(() => {
       this.db
@@ -161,7 +209,7 @@ export class TaskQueue {
     }, "queue:mark-succeeded-failed");
   }
 
-  markFailed(taskId: string, error: string): Result<void, AdamError> {
+  markFailed(taskId: string, error: string, errorContext?: Record<string, unknown>): Result<void, AdamError> {
     return trySync(() => {
       const task = this.db
         .prepare(`SELECT retry_count, max_retries FROM tasks WHERE id = ?`)
@@ -170,15 +218,15 @@ export class TaskQueue {
       if (task && task.retry_count < task.max_retries) {
         this.db
           .prepare(
-            `UPDATE tasks SET status = 'pending', retry_count = retry_count + 1, error = ? WHERE id = ?`,
+            `UPDATE tasks SET status = 'pending', retry_count = retry_count + 1, error = ?, error_context = ? WHERE id = ?`,
           )
-          .run(error, taskId);
+          .run(error, errorContext ? JSON.stringify(errorContext) : null, taskId);
       } else {
         this.db
           .prepare(
-            `UPDATE tasks SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`,
+            `UPDATE tasks SET status = 'failed', error = ?, error_context = ?, finished_at = ? WHERE id = ?`,
           )
-          .run(error, new Date().toISOString(), taskId);
+          .run(error, errorContext ? JSON.stringify(errorContext) : null, new Date().toISOString(), taskId);
       }
     }, "queue:mark-failed-failed");
   }
@@ -206,6 +254,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     input: JSON.parse((row["input"] as string) || "{}") as Record<string, unknown>,
     output: row["output"] ? (JSON.parse(row["output"] as string) as Record<string, unknown>) : null,
     error: (row["error"] as string | null) ?? null,
+    errorContext: row["error_context"] ? (JSON.parse(row["error_context"] as string) as Record<string, unknown>) : null,
     toolCalls: JSON.parse((row["tool_calls"] as string) || "[]") as string[],
     modelTier: (row["model_tier"] as Task["modelTier"]) ?? "capable",
     createdAt: new Date(row["created_at"] as string),

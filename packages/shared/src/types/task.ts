@@ -38,6 +38,7 @@ export const TaskSchema = z.object({
   input: z.record(z.string(), z.unknown()).default({}),
   output: z.record(z.string(), z.unknown()).nullable().default(null),
   error: z.string().nullable().default(null),
+  errorContext: z.record(z.string(), z.unknown()).nullable().optional().default(null),
   toolCalls: z.array(z.string()).default([]),
   modelTier: z.enum(["fast", "capable", "embedding"]).default("capable"),
   createdAt: z.coerce.date(),

@@ -3,7 +3,7 @@ import { ok, err, adamError } from "@adam/shared";
 import { IntentClassifier } from "../classifier.js";
 import type { ModelRouter } from "@adam/models";
 
-function makeRouter(response: ReturnType<typeof ok> | ReturnType<typeof err>) {
+function makeRouter(response: any) {
   return {
     generateObject: vi.fn().mockResolvedValue(response),
   } as unknown as ModelRouter;
@@ -11,7 +11,7 @@ function makeRouter(response: ReturnType<typeof ok> | ReturnType<typeof err>) {
 
 describe("IntentClassifier", () => {
   it("propagates router errors as Err", async () => {
-    const router = makeRouter(err(adamError("router:failed", "model unavailable")));
+    const router = makeRouter(err<any, any>(adamError("router:failed", "model unavailable")));
     const classifier = new IntentClassifier(router);
 
     const result = await classifier.classify("hello", "session-1");

@@ -8,3 +8,4 @@ export * from "./consolidator.js";
 export * from "./scratchpad.js";
 export * from "./workshop.js";
 export * from "./build-supervisor/index.js";
+export * from "./agent-events.js";

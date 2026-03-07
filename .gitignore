@@ -5,7 +5,6 @@ dist/
 *.env
 *.env.*
 !*.env.example
-cookies.json
 coverage/
 *.log
 .DS_Store

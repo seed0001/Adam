@@ -63,6 +63,40 @@ export type ChatResponse = {
   backgroundBase64?: string;
 };
 
+export type Patch = {
+  id: string;
+  source: string;
+  filePath: string;
+  diff: string;
+  rationale: string;
+  status: "proposed" | "pending" | "applied" | "rejected" | "failed";
+  createdAt: string;
+};
+
+export type TraitScore = {
+  trait: string;
+  score: number;
+  lastUpdated: string;
+};
+
+export type FeedbackSignal = {
+  id: string;
+  type: "positive" | "negative" | "neutral";
+  category: string;
+  observation: string;
+  trait?: string;
+  impact: string;
+  createdAt: string;
+};
+
+export type GoldenExample = {
+  id: string;
+  sessionId: string;
+  category: string;
+  notes?: string;
+  createdAt: string;
+};
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -341,8 +375,42 @@ export const api = {
 
   getDiagnosticsResults: () => apiFetch<DiagnosticRunResult | { error: string }>("/api/diagnostics/results"),
 
-  runPipelineTest: () =>
-    apiFetch<PipelineTestResult>("/api/diagnostics/pipeline-test", { method: "POST" }),
+  runPipelineTest: (prompt?: string) =>
+    apiFetch<PipelineTestResult>("/api/diagnostics/pipeline-test", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    }),
+
+  enhancePrompt: (prompt: string) =>
+    apiFetch<{ enhanced: string }>("/api/diagnostics/enhance-prompt", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    }),
+
+  // ── Patches ───────────────────────────────────────────────────────────────
+
+  listPatches: () =>
+    apiFetch<{ patches: Patch[] }>("/api/patches").then((r) => r.patches),
+
+  approvePatch: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/patches/${id}/approve`, { method: "POST" }),
+
+  rejectPatch: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/patches/${id}/reject`, { method: "POST" }),
+
+  // ── Reinforcement ──────────────────────────────────────────────────────────
+
+  submitFeedback: (feedback: Omit<FeedbackSignal, "id" | "createdAt">) =>
+    apiFetch<{ ok: boolean }>("/api/feedback", {
+      method: "POST",
+      body: JSON.stringify(feedback),
+    }),
+
+  listTraits: () =>
+    apiFetch<{ traits: TraitScore[] }>("/api/traits").then((r) => r.traits),
+
+  listGoldenExamples: () =>
+    apiFetch<{ examples: GoldenExample[] }>("/api/golden-examples").then((r) => r.examples),
 };
 
 // ── Diagnostics types ─────────────────────────────────────────────────────────

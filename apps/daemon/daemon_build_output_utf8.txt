@@ -1,0 +1,53 @@
+﻿
+> @adam/daemon@0.1.0 build C:\Users\aztre\Desktop\New folder (45)\adam\apps\daemon
+> tsup src/index.ts src/build-supervisor-worker.ts --format esm --clean
+
+[34mCLI[39m Building entry: src/build-supervisor-worker.ts, src/index.ts
+[34mCLI[39m Using tsconfig: tsconfig.json
+[34mCLI[39m tsup v8.5.1
+[34mCLI[39m Target: es2022
+[34mCLI[39m Cleaning output folder
+[34mESM[39m Build start
+node.exe : X [ERROR] Could not resolve "./suno.js"
+At C:\Users\aztre\AppData\Roaming\npm\pnpm.ps1:24 char:5
++     & "node$exe"  "$basedir/node_modules/pnpm/bin/pnpm.cjs" 
+$args
++     
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (X [ERROR] Could n 
+   ot resolve "./suno.js":String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+    src/index.ts:59:31:
+      59 Γöé import { createSunoSong } from "./suno.js";
+         Γò╡                                ~~~~~~~~~~~
+
+[31mESM[39m [31mBuild failed[39m
+[31mError: Build failed with 1 error:
+src/index.ts:59:31: ERROR: Could not resolve "./suno.js"
+    at failureErrorWithLog (C:\Users\aztre\Desktop\New folder (
+45)\adam\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuild
+\lib\main.js:1467:15)
+    at C:\Users\aztre\Desktop\New folder (45)\adam\node_modules
+\.pnpm\esbuild@0.27.3\node_modules\esbuild\lib\main.js:926:25
+    at runOnEndCallbacks (C:\Users\aztre\Desktop\New folder (45
+)\adam\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuild\l
+ib\main.js:1307:45)
+    at buildResponseToResult (C:\Users\aztre\Desktop\New 
+folder (45)\adam\node_modules\.pnpm\esbuild@0.27.3\node_modules
+\esbuild\lib\main.js:924:7)
+    at C:\Users\aztre\Desktop\New folder (45)\adam\node_modules
+\.pnpm\esbuild@0.27.3\node_modules\esbuild\lib\main.js:951:16
+    at responseCallbacks.<computed> 
+(C:\Users\aztre\Desktop\New folder (45)\adam\node_modules\.pnpm
+\esbuild@0.27.3\node_modules\esbuild\lib\main.js:603:9)
+    at handleIncomingPacket (C:\Users\aztre\Desktop\New folder 
+(45)\adam\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuil
+d\lib\main.js:658:12)
+    at Socket.readFromStdout (C:\Users\aztre\Desktop\New 
+folder (45)\adam\node_modules\.pnpm\esbuild@0.27.3\node_modules
+\esbuild\lib\main.js:581:7)
+    at Socket.emit (node:events:518:28)
+    at addChunk (node:internal/streams/readable:561:12)[39m
+ΓÇëELIFECYCLEΓÇë Command failed with exit code 1.

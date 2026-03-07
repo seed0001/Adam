@@ -12,8 +12,8 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
-    "dev": "tsup src/index.ts --format esm --dts --watch",
+    "build": "tsup src/index.ts --format esm --clean",
+    "dev": "tsup src/index.ts --format esm --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "test": "vitest run",
@@ -25,6 +25,7 @@
     "@adam/memory": "workspace:*",
     "@adam/security": "workspace:*",
     "@adam/skills": "workspace:*",
+    "@adam/diagnostics": "workspace:*",
     "ai": "^4.0.0",
     "zod": "^3.0.0"
   },

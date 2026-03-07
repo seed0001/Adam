@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../lib/api";
+import ContextWindow from "../components/ContextWindow";
 
 type Message = {
   id: string;
@@ -72,8 +73,8 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
 
   return (
     <div className="flex gap-3">
-      <div className="shrink-0 w-6 h-6 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center mt-1">
-        <span className="text-accent text-[9px] font-bold">A</span>
+      <div className="shrink-0 w-6 h-6 rounded-full overflow-hidden border border-[#2a2a2a] shadow-inner mt-1">
+        <img src="/avatar.png" alt="Adam" className="w-full h-full object-cover" />
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-[11px] text-accent font-medium mb-1">{agentName}</p>
@@ -100,8 +101,8 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
 function TypingIndicator({ agentName }: { agentName: string }) {
   return (
     <div className="flex gap-3">
-      <div className="shrink-0 w-6 h-6 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center mt-1">
-        <span className="text-accent text-[9px] font-bold">A</span>
+      <div className="shrink-0 w-6 h-6 rounded-full overflow-hidden border border-[#2a2a2a] shadow-inner mt-1">
+        <img src="/avatar.png" alt="Adam" className="w-full h-full object-cover" />
       </div>
       <div>
         <p className="text-[11px] text-accent font-medium mb-1">{agentName}</p>
@@ -132,7 +133,7 @@ export default function Chat() {
       setAgentName(s.agentName);
       const model = s.activeModels?.capable ?? s.activeModels?.fast ?? null;
       setActiveModel(model);
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -197,88 +198,91 @@ export default function Chat() {
     : undefined;
 
   return (
-    <div className="flex flex-col h-full relative">
-      {/* Background layer */}
-      {backgroundBase64 && (
-        <div
-          className="absolute inset-0 bg-cover bg-center bg-no-repeat opacity-30"
-          style={bgStyle}
-          aria-hidden
-        />
-      )}
-      {backgroundBase64 && (
-        <div
-          className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/70"
-          aria-hidden
-        />
-      )}
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 relative z-10">
-        {messages.length === 0 && !loading && (
-          <div className="flex flex-col items-center justify-center h-full gap-2 select-none">
-            <div className="w-10 h-10 rounded-full bg-accent/10 border border-accent/20 flex items-center justify-center">
-              <span className="text-accent font-bold text-sm">A</span>
-            </div>
-            <p className="text-zinc-500 text-sm">{agentName} is ready.</p>
-            {activeModel && (
-              <p className="text-zinc-700 text-xs font-mono">{activeModel}</p>
-            )}
-            <p className="text-zinc-700 text-xs mt-1">Shift+Enter for new line</p>
-            <p className="text-zinc-600 text-[10px] mt-0.5">
-              Ask Adam to change the background (e.g. &quot;set a cozy café background&quot;)
-            </p>
-          </div>
-        )}
-
-        {messages.map((msg) => (
-          <MsgBubble key={msg.id} msg={msg} agentName={agentName} />
-        ))}
-
-        {loading && <TypingIndicator agentName={agentName} />}
-
-        {error && (
-          <div className="flex justify-center">
-            <p className="text-red-400 text-xs bg-red-950/30 border border-red-900/40 rounded px-3 py-1.5">
-              {error}
-            </p>
-          </div>
-        )}
-
-        <div ref={bottomRef} />
-      </div>
-
-      {/* Input bar */}
-      <div className="shrink-0 px-4 pb-4">
-        <div className="flex items-end gap-2 bg-[#111111]/90 backdrop-blur-md border border-[#242424]/80 rounded-2xl px-4 py-3 focus-within:border-[#333333] transition-colors shadow-lg relative z-10">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={handleInput}
-            onKeyDown={handleKey}
-            placeholder="Message Adam…"
-            rows={1}
-            disabled={loading}
-            className="flex-1 bg-transparent text-sm text-zinc-200 placeholder-zinc-600 resize-none outline-none leading-relaxed min-h-[22px] max-h-[160px] disabled:opacity-50"
+    <div className="flex h-full">
+      <div className="flex-1 flex flex-col h-full relative border-r border-[#1e1e1e]">
+        {/* Background layer */}
+        {backgroundBase64 && (
+          <div
+            className="absolute inset-0 bg-cover bg-center bg-no-repeat opacity-30"
+            style={bgStyle}
+            aria-hidden
           />
-          <button
-            onClick={() => void send()}
-            disabled={!input.trim() || loading}
-            className="shrink-0 w-7 h-7 rounded-lg bg-accent disabled:bg-[#1e1e1e] flex items-center justify-center transition-colors mb-0.5"
-          >
-            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-              <path d="M2 11L11 2M11 2H4.5M11 2V8.5" stroke={!input.trim() || loading ? "#3a3a3a" : "#0a0a0a"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        </div>
-        <div className="flex items-center justify-between mt-2 px-1">
-          <p className="text-[10px] text-zinc-700">
-            File system · shell access. Confirm before destructive actions.
-          </p>
-          {activeModel && (
-            <p className="text-[10px] text-zinc-600 font-mono">{activeModel}</p>
+        )}
+        {backgroundBase64 && (
+          <div
+            className="absolute inset-0 bg-gradient-to-b from-black/60 via-transparent to-black/70"
+            aria-hidden
+          />
+        )}
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 relative z-10">
+          {messages.length === 0 && !loading && (
+            <div className="flex flex-col items-center justify-center h-full gap-2 select-none">
+              <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-accent/30 shadow-2xl mb-2">
+                <img src="/avatar.png" alt="Adam" className="w-full h-full object-cover" />
+              </div>
+              <p className="text-zinc-500 text-sm">{agentName} is ready.</p>
+              {activeModel && (
+                <p className="text-zinc-700 text-xs font-mono">{activeModel}</p>
+              )}
+              <p className="text-zinc-700 text-xs mt-1">Shift+Enter for new line</p>
+              <p className="text-zinc-600 text-[10px] mt-0.5">
+                Ask Adam to change the background (e.g. &quot;set a cozy café background&quot;)
+              </p>
+            </div>
           )}
+
+          {messages.map((msg) => (
+            <MsgBubble key={msg.id} msg={msg} agentName={agentName} />
+          ))}
+
+          {loading && <TypingIndicator agentName={agentName} />}
+
+          {error && (
+            <div className="flex justify-center">
+              <p className="text-red-400 text-xs bg-red-950/30 border border-red-900/40 rounded px-3 py-1.5">
+                {error}
+              </p>
+            </div>
+          )}
+
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Input bar */}
+        <div className="shrink-0 px-4 pb-4">
+          <div className="flex items-end gap-2 bg-[#111111]/90 backdrop-blur-md border border-[#242424]/80 rounded-2xl px-4 py-3 focus-within:border-[#333333] transition-colors shadow-lg relative z-10">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={handleInput}
+              onKeyDown={handleKey}
+              placeholder="Message Adam…"
+              rows={1}
+              disabled={loading}
+              className="flex-1 bg-transparent text-sm text-zinc-200 placeholder-zinc-600 resize-none outline-none leading-relaxed min-h-[22px] max-h-[160px] disabled:opacity-50"
+            />
+            <button
+              onClick={() => void send()}
+              disabled={!input.trim() || loading}
+              className="shrink-0 w-7 h-7 rounded-lg bg-accent disabled:bg-[#1e1e1e] flex items-center justify-center transition-colors mb-0.5"
+            >
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                <path d="M2 11L11 2M11 2H4.5M11 2V8.5" stroke={!input.trim() || loading ? "#3a3a3a" : "#0a0a0a"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex items-center justify-between mt-2 px-1">
+            <p className="text-[10px] text-zinc-700">
+              File system · shell access. Confirm before destructive actions.
+            </p>
+            {activeModel && (
+              <p className="text-[10px] text-zinc-600 font-mono">{activeModel}</p>
+            )}
+          </div>
         </div>
       </div>
+      <ContextWindow sessionId={sessionId.current} />
     </div>
   );
 }

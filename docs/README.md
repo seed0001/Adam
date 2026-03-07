@@ -36,6 +36,9 @@ The architecture is organized around a set of core ideas:
 | [OVERVIEW.md](OVERVIEW.md) | Technical deep dive — packages, data flow, architecture |
 | [BUILD_SUPERVISOR.md](BUILD_SUPERVISOR.md) | BuildSupervisor — background build jobs, pipeline stages |
 | [DIAGNOSTICS.md](DIAGNOSTICS.md) | System diagnostics dashboard — codebase analysis, pipeline tests |
+| [PROCESS_FLOW.md](PROCESS_FLOW.md) | Technical overview of intent classification, planning, and execution flow |
+| [SELF_REPAIR.md](SELF_REPAIR.md) | Documentation of the Failure Reflex Loop and robust file verification |
+| [REINFORCEMENT.md](REINFORCEMENT.md) | Details on behavior shaping, trait tracking, and Golden Examples |
 
 ---
 
@@ -75,6 +78,10 @@ The architecture is organized around a set of core ideas:
 | BuildSupervisor — background build jobs with agent tools | ✅ |
 | System diagnostics dashboard — codebase analysis, pipeline tests | ✅ |
 | Suno song creation — browser automation (create_suno_song tool) | ✅ |
+| **Self-Repair (Failure Reflex Loop)** — automatic diagnosis and patch proposals on failure | ✅ |
+| **Robust File Handling** — mandatory read-after-write verification | ✅ |
+| **Continuous Improvement (Review Loop)** — stochastic background review and optimization | ✅ |
+| **Behavior Reinforcement** — trait tracking, scoring, and Golden Example curation | ✅ |
 | Semantic vector search (sqlite-vec) | 🔜 |
 | MCP (Model Context Protocol) support | 🔜 |
 | Scheduled tasks | 🔜 |
@@ -361,7 +368,7 @@ adam/
     ├── skills/          # Built-in tools · model-backed code tools · SkillSchema · SkillStore
     ├── adapters/        # CLI · Telegram · Discord (slash commands, channel filtering)
     ├── voice/           # LuxTTS sidecar · VoiceRegistry · Edge/XTTS providers
-    ├── diagnostics/     # Codebase analyzer · pipeline registry · test runner
+    ├── diagnostics/     # Codebase analyzer · pipeline registry · test runner · PatchService · ReinforcementService
     └── shared/          # Config schema · types · result utilities · constants
 ```
 
@@ -375,6 +382,8 @@ adam/
 6. **Extract** — background pass extracts any new user facts into the profile
 7. **Shape** — if the message contains personality direction, the profile is updated
 8. **Pad** — background pass checks if the scratchpad needs updating
+9. **Repair** (if failed) — automatic error diagnosis via PatchService; proposal generated for the Patch Queue
+10. **Reinforce** — updates trait scores and curates interaction benchmarks
 
 **Consolidator** — runs concurrently with no global clock:
 - Applies exponential confidence decay to unused profile facts

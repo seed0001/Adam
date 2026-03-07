@@ -3,7 +3,7 @@ import { ok, err, adamError } from "@adam/shared";
 import { Planner } from "../planner.js";
 import type { ModelRouter } from "@adam/models";
 
-function makeRouter(response: ReturnType<typeof ok> | ReturnType<typeof err>) {
+function makeRouter(response: any) {
   return {
     generateObject: vi.fn().mockResolvedValue(response),
   } as unknown as ModelRouter;

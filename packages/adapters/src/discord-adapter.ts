@@ -131,12 +131,32 @@ export class DiscordAdapter extends BaseAdapter {
   }
 
   /** Send a message to any channel by ID. Used by tools and adapter.send(). */
-  async sendToChannel(channelId: string, content: string): Promise<void> {
+  async sendToChannel(channelId: string, content: string, attachments?: string[]): Promise<void> {
     if (!this.client) throw new Error("Discord client not started");
     const channel = await this.client.channels.fetch(channelId);
     if (!isSendable(channel)) throw new Error(`Channel ${channelId} is not a sendable text channel`);
+
     const chunks = splitMessage(content, this.config.maxMessageLength);
-    for (const chunk of chunks) await channel.send(chunk);
+
+    if (attachments && attachments.length > 0) {
+      const { AttachmentBuilder } = await import("discord.js");
+      const files = attachments.map(path => new AttachmentBuilder(path));
+
+      // Send first chunk with all attachments
+      await channel.send({
+        content: chunks[0] ?? "…",
+        files,
+      });
+
+      // Send remaining chunks
+      for (const chunk of chunks.slice(1)) {
+        await channel.send(chunk);
+      }
+    } else {
+      for (const chunk of chunks) {
+        await channel.send(chunk);
+      }
+    }
   }
 
   /**
@@ -149,14 +169,25 @@ export class DiscordAdapter extends BaseAdapter {
    *
    * Requires the bot to share at least one server with the target user.
    */
-  async dmUser(usernameOrId: string, content: string): Promise<{ username: string; userId: string }> {
+  async dmUser(usernameOrId: string, content: string, attachments?: string[]): Promise<{ username: string; userId: string }> {
     if (!this.client) throw new Error("Discord client not started");
+
+    const sendChunks = async (user: any) => {
+      const chunks = splitMessage(content, this.config.maxMessageLength);
+      if (attachments && attachments.length > 0) {
+        const { AttachmentBuilder } = await import("discord.js");
+        const files = attachments.map((p: string) => new AttachmentBuilder(p));
+        await user.send({ content: chunks[0] ?? "…", files });
+        for (const chunk of chunks.slice(1)) await user.send(chunk);
+      } else {
+        for (const chunk of chunks) await user.send(chunk);
+      }
+    };
 
     // Fast path: numeric user ID
     if (/^\d{17,20}$/.test(usernameOrId.trim())) {
       const user = await this.client.users.fetch(usernameOrId.trim());
-      const chunks = splitMessage(content, this.config.maxMessageLength);
-      for (const chunk of chunks) await user.send(chunk);
+      await sendChunks(user);
       return { username: user.username, userId: user.id };
     }
 
@@ -174,8 +205,7 @@ export class DiscordAdapter extends BaseAdapter {
         const uname = member.user.username.toLowerCase();
         const display = member.displayName.toLowerCase();
         if (uname === query || display === query || uname.startsWith(query)) {
-          const chunks = splitMessage(content, this.config.maxMessageLength);
-          for (const chunk of chunks) await member.user.send(chunk);
+          await sendChunks(member.user);
           return { username: member.user.username, userId: member.user.id };
         }
       }
@@ -285,14 +315,24 @@ export class DiscordAdapter extends BaseAdapter {
 
   async send(message: OutboundMessage): Promise<void> {
     const audioPath = message.metadata?.["audioPath"] as string | undefined;
+    const attachments = message.attachments;
 
     // If there's a pending slash command interaction, edit the deferred reply
     const interaction = this.pendingInteractions.get(message.channelId);
     if (interaction?.deferred) {
       this.pendingInteractions.delete(message.channelId);
       const chunks = splitMessage(message.content, this.config.maxMessageLength);
-      await interaction.editReply(chunks[0] ?? "…");
+
+      const options: any = { content: chunks[0] ?? "…" };
+      if (attachments && attachments.length > 0) {
+        const { AttachmentBuilder } = await import("discord.js");
+        options.files = attachments.map((path: string) => new AttachmentBuilder(path));
+      }
+
+      await interaction.editReply(options);
+
       for (const chunk of chunks.slice(1)) await interaction.followUp(chunk);
+
       if (audioPath) {
         const { AttachmentBuilder } = await import("discord.js");
         await interaction.followUp({
@@ -309,13 +349,19 @@ export class DiscordAdapter extends BaseAdapter {
       const { AttachmentBuilder } = await import("discord.js");
       const chunks = splitMessage(message.content, this.config.maxMessageLength);
       const first = chunks[0] ?? "…";
+
+      const files = [new AttachmentBuilder(audioPath, { name: "adam.mp3" })];
+      if (attachments && attachments.length > 0) {
+        files.push(...attachments.map((path: string) => new AttachmentBuilder(path)));
+      }
+
       await channel.send({
         content: first,
-        files: [new AttachmentBuilder(audioPath, { name: "adam.mp3" })],
+        files,
       });
       for (const chunk of chunks.slice(1)) await channel.send(chunk);
     } else {
-      await this.sendToChannel(message.channelId, message.content);
+      await this.sendToChannel(message.channelId, message.content, attachments);
     }
   }
 
@@ -354,7 +400,7 @@ export class DiscordAdapter extends BaseAdapter {
 
     // ── Rate limiting ────────────────────────────────────────────────────────
     if (!this.limiter.isAllowed(msg.author.id, this.config.rateLimitPerUserPerMinute)) {
-      await msg.reply("Slow down.").catch(() => {});
+      await msg.reply("Slow down.").catch(() => { });
       return;
     }
 
@@ -372,7 +418,7 @@ export class DiscordAdapter extends BaseAdapter {
 
     // ── Typing indicator ──────────────────────────────────────────────────────
     if (isSendable(msg.channel)) {
-      void msg.channel.sendTyping().catch(() => {});
+      void msg.channel.sendTyping().catch(() => { });
     }
 
     const inbound: InboundMessage = {
@@ -390,6 +436,7 @@ export class DiscordAdapter extends BaseAdapter {
         guildId: msg.guildId ?? undefined,
         messageId: msg.id,
         systemPromptOverride: this.config.systemPromptOverride,
+        isPrivileged: this.config.adminUsers.includes(msg.author.id),
       },
     };
 
@@ -518,7 +565,11 @@ export class DiscordAdapter extends BaseAdapter {
         content: message,
         attachments: [],
         receivedAt: new Date(),
-        metadata: { username: interaction.user.username, slashCommand: true },
+        metadata: {
+          username: interaction.user.username,
+          slashCommand: true,
+          isPrivileged: this.config.adminUsers.includes(interaction.user.id),
+        },
       };
 
       // We emit the message and the response gets sent via adapter.send()

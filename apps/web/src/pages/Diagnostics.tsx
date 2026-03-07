@@ -56,6 +56,8 @@ export default function Diagnostics() {
   const [activeTab, setActiveTab] = useState<"analysis" | "pipeline" | "pipeline-test" | "tests" | "results">("analysis");
   const [pipelineTestResult, setPipelineTestResult] = useState<PipelineTestResult | null>(null);
   const [pipelineTestRunning, setPipelineTestRunning] = useState(false);
+  const [testPrompt, setTestPrompt] = useState("Hi, dude. Can you create a discord in python and save it to our projects folder, please");
+  const [enhancing, setEnhancing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -97,7 +99,7 @@ export default function Diagnostics() {
     setPipelineTestResult(null);
     setError(null);
     try {
-      const r = await api.runPipelineTest();
+      const r = await api.runPipelineTest(testPrompt);
       setPipelineTestResult(r);
       setActiveTab("pipeline-test");
     } catch (e) {
@@ -105,7 +107,20 @@ export default function Diagnostics() {
     } finally {
       setPipelineTestRunning(false);
     }
-  }, []);
+  }, [testPrompt]);
+
+  const handleEnhance = async () => {
+    if (!testPrompt.trim()) return;
+    setEnhancing(true);
+    try {
+      const { enhanced } = await api.enhancePrompt(testPrompt);
+      setTestPrompt(enhanced);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Enhancement failed");
+    } finally {
+      setEnhancing(false);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -168,9 +183,8 @@ export default function Diagnostics() {
           <button
             key={t.id}
             onClick={() => setActiveTab(t.id)}
-            className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-              activeTab === t.id ? "bg-[#1a1a1a] text-accent" : "text-zinc-500 hover:text-zinc-300"
-            }`}
+            className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${activeTab === t.id ? "bg-[#1a1a1a] text-accent" : "text-zinc-500 hover:text-zinc-300"
+              }`}
           >
             {t.label}
           </button>
@@ -208,9 +222,8 @@ export default function Diagnostics() {
                 {analysis.packages.map((p) => (
                   <span
                     key={p.name}
-                    className={`text-[10px] px-2 py-1 rounded border ${
-                      p.hasTests ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" : "bg-zinc-500/10 text-zinc-400 border-zinc-500/30"
-                    }`}
+                    className={`text-[10px] px-2 py-1 rounded border ${p.hasTests ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" : "bg-zinc-500/10 text-zinc-400 border-zinc-500/30"
+                      }`}
                   >
                     {p.name} {p.hasTests ? "✓" : ""}
                   </span>
@@ -249,14 +262,29 @@ export default function Diagnostics() {
           <div className="space-y-4">
             <Card title="Pipeline Test (Ollama + Code Tools)">
               <p className="text-zinc-500 text-xs mb-3">
-                Sends a fixed prompt through the agent to verify Ollama and code tools are wired. If applications
+                Sends a prompt through the agent to verify Ollama and code tools are wired. If applications
                 aren&apos;t being created, check that Ollama is running and workspace points to your projects folder.
               </p>
-              <div className="rounded bg-[#0d0d0d] border border-[#1a1a1a] px-3 py-2 mb-3">
-                <p className="text-zinc-500 text-[10px] uppercase tracking-wider mb-1">Test prompt</p>
-                <p className="text-zinc-300 text-xs font-mono">
-                  &quot;Hi, dude. Can you create a discord in python and save it to our projects folder, please&quot;
-                </p>
+              <div className="space-y-3 mb-4">
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-zinc-500 text-[10px] uppercase tracking-wider">Test prompt</p>
+                    <button
+                      onClick={() => void handleEnhance()}
+                      disabled={enhancing || pipelineTestRunning || !testPrompt.trim()}
+                      className="text-[10px] text-accent hover:text-accent/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 font-medium"
+                    >
+                      {enhancing ? "Enhancing…" : "✨ AI Enhance"}
+                    </button>
+                  </div>
+                  <textarea
+                    value={testPrompt}
+                    onChange={(e) => setTestPrompt(e.target.value)}
+                    disabled={pipelineTestRunning}
+                    className="w-full h-20 px-3 py-2 rounded bg-[#0d0d0d] border border-[#1a1a1a] text-xs font-mono text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-accent/50 resize-none"
+                    placeholder="Enter a prompt to test your agent's code tools..."
+                  />
+                </div>
               </div>
               {pipelineTestResult ? (
                 <div className="space-y-3">

@@ -3,7 +3,7 @@ export const ADAM_VERSION = "0.1.0";
 export const ADAM_HOME_DIR = ".adam";
 
 export const PORTS = {
-  DAEMON: 18800,
+  DAEMON: 18801,
   VOICE_SIDECAR: 18799,
 } as const;
 

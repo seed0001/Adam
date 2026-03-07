@@ -65,6 +65,27 @@ export const profileMemory = sqliteTable("profile_memory", {
 });
 
 /**
+ * Proposed code patches for self-repair or continuous improvement.
+ */
+export const patches = sqliteTable("patches", {
+  id: text("id").primaryKey(),
+  source: text("source", { enum: ["reflex", "review"] }).notNull(),
+  taskId: text("task_id"),
+  filePath: text("file_path").notNull(),
+  diff: text("diff").notNull(),
+  rationale: text("rationale").notNull(),
+  status: text("status", { enum: ["proposed", "approved", "rejected", "applied"] })
+    .notNull()
+    .default("proposed"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
+
+/**
  * Sessions — groups of interactions.
  */
 export const sessions = sqliteTable("sessions", {
@@ -83,9 +104,42 @@ export const sessions = sqliteTable("sessions", {
   metadata: text("metadata").default("{}"),
 });
 
+/**
+ * Behavior reinforcement signals — positive/negative feedback.
+ */
+export const feedback = sqliteTable("feedback", {
+  id: text("id").primaryKey(),
+  type: text("type", { enum: ["positive", "negative", "neutral"] }).notNull(),
+  category: text("category").notNull(),
+  observation: text("observation").notNull(),
+  impact: text("impact", { enum: ["high", "medium", "low"] }).notNull().default("medium"),
+  trait: text("trait"), // Trait name this feedback reinforces
+  isGolden: integer("is_golden", { mode: "boolean" }).notNull().default(false),
+  sessionId: text("session_id"),
+  taskId: text("task_id"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
+
+/**
+ * Persisted behavior traits and their cumulative reinforcement scores.
+ */
+export const traits = sqliteTable("traits", {
+  name: text("name").primaryKey(),
+  score: integer("score").notNull().default(0),
+  updatedAt: text("updated_at")
+    .notNull()
+    .default(sql`(datetime('now'))`),
+});
+
 export type EpisodicMemoryRow = typeof episodicMemory.$inferSelect;
 export type EpisodicMemoryInsert = typeof episodicMemory.$inferInsert;
 export type ProfileMemoryRow = typeof profileMemory.$inferSelect;
 export type ProfileMemoryInsert = typeof profileMemory.$inferInsert;
 export type SessionRow = typeof sessions.$inferSelect;
 export type SessionInsert = typeof sessions.$inferInsert;
+export type FeedbackRow = typeof feedback.$inferSelect;
+export type FeedbackInsert = typeof feedback.$inferInsert;
+export type TraitRow = typeof traits.$inferSelect;
+export type TraitInsert = typeof traits.$inferInsert;

@@ -29,19 +29,18 @@ export interface CoderRouter {
 //
 // These tools implement the "division of labor" architecture:
 //
-//   Cloud model (Grok / GPT-4o) = senior engineer
+//   Cloud model (Grok / GPT-4o) = senior engineer / planner
 //     – decides WHAT to build and WHY
 //     – describes intent in plain language
 //     – reviews diffs and directs next steps
 //
-//   Local coder model (DeepSeek Coder V2, Qwen2.5-Coder) = fast junior with root access
+//   Cloud model (Grok / GPT-4o) = expert code analyst developer
 //     – receives structured instructions
-//     – implements without reasoning about goals
-//     – never decides architecture
-//     – returns concrete output (file contents, diffs)
+//     – implements as an expert without architectural reasoning
+//     – return concrete output (file contents, diffs)
 //
-// The cloud model NEVER touches the filesystem directly through these tools.
-// The local coder model NEVER sees the user's conversation or decides what to build.
+// The cloud model (planner) NEVER touches the filesystem directly through these tools.
+// The cloud model (expert implementer) receives specific scoped instructions.
 
 /**
  * Resolve a path: if absolute, use as-is. If relative, resolve against workspace.
@@ -55,9 +54,9 @@ function resolvePath(p: string, workspace: string): string {
 export function createCodeTools(router: CoderRouter, sessionId: string, workspace: string): Map<string, CoreTool> {
   return new Map<string, CoreTool>([
     ["code_write_file", codeWriteFileTool(router, sessionId, workspace)],
-    ["code_edit_file",  codeEditFileTool(router, sessionId, workspace)],
-    ["code_scaffold",   codeScaffoldTool(router, sessionId, workspace)],
-    ["code_review",     codeReviewTool(router, sessionId, workspace)],
+    ["code_edit_file", codeEditFileTool(router, sessionId, workspace)],
+    ["code_scaffold", codeScaffoldTool(router, sessionId, workspace)],
+    ["code_review", codeReviewTool(router, sessionId, workspace)],
   ]);
 }
 
@@ -110,13 +109,28 @@ function codeWriteFileTool(router: CoderRouter, sessionId: string, workspace: st
       const content = stripCodeFences(result.value);
       ensureDir(resolvedPath);
       writeFileSync(resolvedPath, content, "utf-8");
+
+      const env = {
+        pid: process.pid,
+        cwd: process.cwd(),
+        resolvedPath,
+      };
+
+      // Verification Loop
+      const readBack = readFileSync(resolvedPath, "utf-8");
+      if (readBack !== content) {
+        throw new Error(`Write verification failed: read content did not match written content at ${resolvedPath}`);
+      }
+
       const lines = content.split("\n").length;
 
       return {
         success: true,
         path: resolvedPath,
+        verified: true,
         lines_written: lines,
         preview: content.slice(0, 300),
+        env,
       };
     },
   });
@@ -151,7 +165,7 @@ function codeEditFileTool(router: CoderRouter, sessionId: string, workspace: str
 
       const result = await router.generate({
         sessionId,
-        tier: "coder",
+        tier: "capable",
         system: coderSystemPrompt(),
         prompt:
           `Edit the following ${lang} file based on the instruction.\n\n` +
@@ -168,6 +182,18 @@ function codeEditFileTool(router: CoderRouter, sessionId: string, workspace: str
       const updated = stripCodeFences(result.value);
       writeFileSync(resolvedPath, updated, "utf-8");
 
+      const env = {
+        pid: process.pid,
+        cwd: process.cwd(),
+        resolvedPath,
+      };
+
+      // Verification Loop
+      const readBack = readFileSync(resolvedPath, "utf-8");
+      if (readBack !== updated) {
+        throw new Error(`Write verification failed: read content did not match updated content at ${resolvedPath}`);
+      }
+
       const beforeLines = original.split("\n").length;
       const afterLines = updated.split("\n").length;
       const diffSummary = buildDiffSummary(original, updated);
@@ -175,11 +201,13 @@ function codeEditFileTool(router: CoderRouter, sessionId: string, workspace: str
       return {
         success: true,
         path: resolvedPath,
+        verified: true,
         before_lines: beforeLines,
         after_lines: afterLines,
         delta: afterLines - beforeLines,
         diff_summary: diffSummary,
         preview_after: updated.slice(0, 400),
+        env,
       };
     },
   });
@@ -237,15 +265,31 @@ function codeScaffoldTool(router: CoderRouter, sessionId: string, workspace: str
         const content = stripCodeFences(result.value);
         ensureDir(fullPath);
         writeFileSync(fullPath, content, "utf-8");
+
+        // Verification Loop
+        const readBack = readFileSync(fullPath, "utf-8");
+        if (readBack !== content) {
+          errors.push(`${file.path}: Write verification failed!`);
+          continue;
+        }
+
         created.push(file.path);
       }
+
+      const env = {
+        pid: process.pid,
+        cwd: process.cwd(),
+        directory: resolvedDir,
+      };
 
       return {
         success: errors.length === 0,
         directory: resolvedDir,
+        verified: errors.length === 0,
         created,
         errors,
         total: file_list.length,
+        env,
       };
     },
   });
@@ -302,8 +346,8 @@ function codeReviewTool(router: CoderRouter, sessionId: string, workspace: strin
 
 function coderSystemPrompt(): string {
   return (
-    "You are a code implementation engine. " +
-    "You receive precise instructions from a senior engineer and execute them exactly. " +
+    "You are an expert code analyst developer. " +
+    "You receive precise instructions from a senior engineer and execute them with high expertise. " +
     "You do not reason about goals, suggest architecture changes, or add unrequested features. " +
     "You output code only — no explanation, no commentary, no markdown fences unless explicitly asked. " +
     "Match the style and conventions of any existing code shown to you."

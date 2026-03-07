@@ -32,6 +32,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     input: {},
     output: null,
     error: null,
+    errorContext: null,
     toolCalls: [],
     modelTier: "capable",
     createdAt: new Date(),
