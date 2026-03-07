@@ -7,7 +7,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createXai } from "@ai-sdk/xai";
 import { createOllama } from "ollama-ai-provider";
-import { ollamaFetch } from "./ollama-fetch.js";
+import { localFetch } from "./local-fetch.js";
 import { qwenFetch } from "./qwen-fetch.js";
 import type { EmbeddingModel } from "ai";
 // Use a broad type to stay compatible across AI SDK provider versions
@@ -110,6 +110,35 @@ export class ProviderRegistry {
     return models;
   }
 
+  resolveLocalModels(tier: ModelTier): LanguageModel[] {
+    let configs: ProviderConfig[] = [];
+
+    if (tier === "embedding") {
+      configs = this.pool.embedding || [];
+    } else if (tier === "coder") {
+      configs = this.pool.coder.length > 0 ? this.pool.coder : this.pool.capable;
+    } else if (tier === "fast") {
+      configs = [...(this.pool.fast || []), ...(this.pool.capable || [])];
+    } else {
+      configs = this.pool[tier] || [];
+    }
+
+    const localConfigs = configs.filter(c => c.type === "local");
+    const models: LanguageModel[] = [];
+    for (const config of localConfigs) {
+      const result = this.buildLanguageModel(config);
+      if (result.isOk()) {
+        models.push(result.value);
+      }
+    }
+
+    logger.debug(`Resolved ${models.length} local models for tier ${tier}`, {
+      models: models.map(m => m.modelId)
+    });
+
+    return models;
+  }
+
   resolveEmbeddingModel(): Result<EmbeddingModel<string>, AdamError> {
     const configs = this.pool.embedding;
     for (const config of configs) {
@@ -174,14 +203,14 @@ export class ProviderRegistry {
         const baseURL = config.baseUrl
           ? `${config.baseUrl.replace(/\/$/, "")}/api`
           : "http://127.0.0.1:11434/api";
-        const ollama = createOllama({ baseURL, fetch: ollamaFetch });
+        const ollama = createOllama({ baseURL, fetch: localFetch });
         return ollama(config.model);
       }
       case "lmstudio":
       case "vllm":
       case "openai-compatible": {
         const baseURL = config.baseUrl ?? "http://localhost:1234/v1";
-        return createOpenAI({ baseURL, apiKey: "local" })(config.model);
+        return createOpenAI({ baseURL, apiKey: "local", fetch: localFetch })(config.model);
       }
     }
   }

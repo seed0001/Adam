@@ -20,7 +20,9 @@ describe("Shell Process Cleanup", () => {
         }
 
         // Trigger cleanup
-        stopAllShellProcesses();
+        if (typeof stopAllShellProcesses === "function") {
+            stopAllShellProcesses();
+        }
 
         // Give it a moment to die
         await new Promise(resolve => setTimeout(resolve, 1000));

@@ -10,5 +10,5 @@ const agent = new Agent({
   connectTimeout: 60_000,
 });
 
-export const ollamaFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+export const localFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
   undiciFetch(input, { ...init, dispatcher: agent })) as typeof fetch;
