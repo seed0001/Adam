@@ -86,7 +86,7 @@ export class ModelRouter {
   getModels(tier: ModelTier): AnyLanguageModel[] {
     if (this.isBudgetExhausted() && this.budget.fallbackToLocalOnExhaustion) {
       logger.warn("Budget exhausted, falling back to local model");
-      return this.registry.resolveLanguageModels("fast");
+      return this.registry.resolveLocalModels("fast");
     }
     return this.registry.resolveLanguageModels(tier);
   }

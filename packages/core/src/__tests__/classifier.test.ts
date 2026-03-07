@@ -6,6 +6,7 @@ import type { ModelRouter } from "@adam/models";
 function makeRouter(response: any) {
   return {
     generateObject: vi.fn().mockResolvedValue(response),
+    generate: vi.fn().mockResolvedValue(response),
   } as unknown as ModelRouter;
 }
 

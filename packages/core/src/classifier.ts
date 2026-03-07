@@ -7,6 +7,7 @@ import {
   type ModelTier,
   ok,
   err,
+  adamError,
   createLogger,
 } from "@adam/shared";
 import type { ModelRouter } from "@adam/models";

@@ -149,7 +149,6 @@ export class TaskQueue {
             null,
             null,
             null,
-            null,
             JSON.stringify(task.toolCalls),
             task.modelTier,
             task.createdAt.toISOString(),
