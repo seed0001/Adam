@@ -6,7 +6,9 @@ import {
   existsSync,
   mkdirSync,
 } from "node:fs";
-import { join, dirname, isAbsolute } from "node:path";
+import { join, dirname, isAbsolute, basename } from "node:path";
+import { spawn } from "node:child_process";
+import { LiveView } from "./live-view.js";
 import type { ModelTier, Result, AdamError } from "@adam/shared";
 import type { CoreTool } from "ai";
 
@@ -23,6 +25,13 @@ export interface CoderRouter {
     prompt: string;
     maxTokens?: number;
   }): Promise<Result<string, AdamError>>;
+  stream(opts: {
+    sessionId: string;
+    tier: ModelTier;
+    system?: string;
+    prompt: string;
+    maxTokens?: number;
+  }): Promise<Result<AsyncIterable<string>, AdamError>>;
 }
 
 // ── Code Tools ────────────────────────────────────────────────────────────────
@@ -57,6 +66,8 @@ export function createCodeTools(router: CoderRouter, sessionId: string, workspac
     ["code_edit_file", codeEditFileTool(router, sessionId, workspace)],
     ["code_scaffold", codeScaffoldTool(router, sessionId, workspace)],
     ["code_review", codeReviewTool(router, sessionId, workspace)],
+    ["code_search_artifacts", codeSearchArtifactsTool()],
+    ["code_list_artifacts", codeListArtifactsTool()],
   ]);
 }
 
@@ -106,14 +117,57 @@ function codeWriteFileTool(router: CoderRouter, sessionId: string, workspace: st
         return { success: false, error: result.error.message };
       }
 
-      const content = stripCodeFences(result.value);
+      const streamResult = await router.stream({
+        sessionId,
+        tier: "coder",
+        system: coderSystemPrompt(),
+        prompt:
+          `Write the complete contents of a ${lang} file.\n\n` +
+          `File path: ${resolvedPath}\n\n` +
+          `Requirements:\n${description}` +
+          contextBlock +
+          `\n\nReturn ONLY the file contents. No explanation, no markdown fences, no preamble.`,
+      });
+
+      if (streamResult.isErr()) {
+        return { success: false, error: streamResult.error.message };
+      }
+
       ensureDir(resolvedPath);
-      writeFileSync(resolvedPath, content, "utf-8");
+      let content = "";
+      const liveView = LiveView.getInstance(workspace);
+      liveView.open(resolvedPath);
+
+      // We'll write to the file incrementally
+      for await (const chunk of streamResult.value) {
+        content += chunk;
+        writeFileSync(resolvedPath, content, "utf-8");
+        liveView.update(content);
+      }
+
+      // After writing locally (for immediate feedback/live view),
+      // we route it through the Python File Tool to maintain its index/metadata.
+      let artifact_id = "pending";
+      try {
+        const output = await runPythonFileTool("create", [
+          description || "",
+          basename(resolvedPath),
+          `Created via Adam: ${description || ""}`
+        ]);
+        // Extract ID from output (Bridge prints success lines)
+        const match = output.match(/ID: ([a-f0-9-]+)/);
+        if (match?.[1]) {
+          artifact_id = match[1];
+        }
+      } catch (e) {
+        console.error("Failed to sync with Python File Tool:", e);
+      }
 
       const env = {
         pid: process.pid,
         cwd: process.cwd(),
         resolvedPath,
+        artifact_id,
       };
 
       // Verification Loop
@@ -163,7 +217,7 @@ function codeEditFileTool(router: CoderRouter, sessionId: string, workspace: str
       const original = readFileSync(resolvedPath, "utf-8");
       const lang = inferLanguage(path);
 
-      const result = await router.generate({
+      const streamResult = await router.stream({
         sessionId,
         tier: "capable",
         system: coderSystemPrompt(),
@@ -175,17 +229,41 @@ function codeEditFileTool(router: CoderRouter, sessionId: string, workspace: str
           `Return ONLY the complete updated file contents. No explanation, no markdown fences.`,
       });
 
-      if (result.isErr()) {
-        return { success: false, error: result.error.message };
+      if (streamResult.isErr()) {
+        return { success: false, error: streamResult.error.message };
       }
 
-      const updated = stripCodeFences(result.value);
-      writeFileSync(resolvedPath, updated, "utf-8");
+      let updated = "";
+      const liveView = LiveView.getInstance(workspace);
+      liveView.open(resolvedPath);
+
+      for await (const chunk of streamResult.value) {
+        updated += chunk;
+        writeFileSync(resolvedPath, updated, "utf-8");
+        liveView.update(updated);
+      }
+
+      // Sync with Python File Tool
+      let artifact_id = "pending";
+      try {
+        // Note: The bridge's edit command needs the prompt/intent
+        const output = await runPythonFileTool("edit", [
+          "output", // default artifact directory if we need to search there, but bridge uses search logic
+          instruction || ""
+        ]);
+        const match = output.match(/ID: ([a-f0-9-]+)/);
+        if (match?.[1]) {
+          artifact_id = match[1];
+        }
+      } catch (e) {
+        console.error("Failed to sync with Python File Tool:", e);
+      }
 
       const env = {
         pid: process.pid,
         cwd: process.cwd(),
         resolvedPath,
+        artifact_id,
       };
 
       // Verification Loop
@@ -342,6 +420,42 @@ function codeReviewTool(router: CoderRouter, sessionId: string, workspace: strin
   });
 }
 
+// ── code_search_artifacts ───────────────────────────────────────────────────
+
+function codeSearchArtifactsTool(): CoreTool {
+  return tool({
+    description: "Search for artifacts in the Python File Tool index by pattern (e.g. *.py, test.txt).",
+    parameters: z.object({
+      pattern: z.string().describe("Search pattern for filenames"),
+    }),
+    execute: async ({ pattern }) => {
+      try {
+        const output = await runPythonFileTool("search", [pattern]);
+        return { success: true, results: output };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+  });
+}
+
+// ── code_list_artifacts ──────────────────────────────────────────────────────
+
+function codeListArtifactsTool(): CoreTool {
+  return tool({
+    description: "List all known artifacts in the Python File Tool metadata index.",
+    parameters: z.object({}),
+    execute: async () => {
+      try {
+        const output = await runPythonFileTool("list", []);
+        return { success: true, artifacts: output };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+  });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function coderSystemPrompt(): string {
@@ -373,6 +487,33 @@ function stripCodeFences(text: string): string {
   s = s.replace(/^```[a-zA-Z]*\n?/, "");
   s = s.replace(/\n?```$/, "");
   return s.trimEnd();
+}
+
+async function runPythonFileTool(command: string, args: string[]): Promise<string> {
+  const pythonPath = "python"; // Assume python is in PATH
+  const scriptPath = "c:\\Users\\aztre\\Desktop\\New Adam\\File Tool\\adam_bridge.py";
+
+  return new Promise((resolve, reject) => {
+    const process = spawn(pythonPath, [scriptPath, command, ...args]);
+    let stdout = "";
+    let stderr = "";
+
+    process.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    process.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    process.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(`Python process failed with code ${code}: ${stderr}`));
+      }
+    });
+  });
 }
 
 function ensureDir(filePath: string): void {
