@@ -47,6 +47,7 @@ export default function Memory() {
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmClearEpisodic, setConfirmClearEpisodic] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,7 +76,12 @@ export default function Memory() {
   };
 
   const clearAll = async () => {
-    for (const f of facts) await deleteFact(f.key);
+    try {
+      await api.clearAllProfileMemory();
+      setFacts([]);
+    } catch {
+      /* ignore */
+    }
     setConfirmClear(false);
   };
 
@@ -85,6 +91,15 @@ export default function Memory() {
     ...categoryOrder.filter((c) => grouped[c]),
     ...Object.keys(grouped).filter((c) => !categoryOrder.includes(c)),
   ];
+
+  const clearEpisodic = async () => {
+    try {
+      await api.clearAllEpisodicMemory();
+    } catch {
+      /* ignore */
+    }
+    setConfirmClearEpisodic(false);
+  };
 
   return (
     <div className="h-full overflow-y-auto px-4 py-4">
@@ -97,22 +112,50 @@ export default function Memory() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {facts.length > 0 && !confirmClear && (
+          {/* Episodic clear */}
+          {!confirmClearEpisodic && !confirmClear && (
+            <button
+              onClick={() => setConfirmClearEpisodic(true)}
+              className="text-xs text-zinc-600 hover:text-amber-400 transition-colors"
+              title="Clear all conversation history"
+            >
+              Clear history
+            </button>
+          )}
+          {confirmClearEpisodic && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-zinc-500">Erase all conversation history?</span>
+              <button
+                onClick={() => void clearEpisodic()}
+                className="text-xs text-amber-400 hover:text-amber-300 transition-colors"
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => setConfirmClearEpisodic(false)}
+                className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {/* Profile clear */}
+          {facts.length > 0 && !confirmClear && !confirmClearEpisodic && (
             <button
               onClick={() => setConfirmClear(true)}
               className="text-xs text-zinc-600 hover:text-red-400 transition-colors"
             >
-              Clear all
+              Clear profile
             </button>
           )}
           {confirmClear && (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-zinc-500">Sure?</span>
+              <span className="text-xs text-zinc-500">Erase all profile facts?</span>
               <button
                 onClick={() => void clearAll()}
                 className="text-xs text-red-400 hover:text-red-300 transition-colors"
               >
-                Yes, clear
+                Yes
               </button>
               <button
                 onClick={() => setConfirmClear(false)}

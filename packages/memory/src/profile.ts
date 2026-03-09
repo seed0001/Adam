@@ -154,6 +154,16 @@ export class ProfileStore {
     }, "profile:delete-failed");
   }
 
+  deleteAll(): Result<void, AdamError> {
+    return trySync(() => {
+      this.db
+        .update(profileMemory)
+        .set({ deletedAt: new Date().toISOString() })
+        .where(isNull(profileMemory.deletedAt))
+        .run();
+    }, "profile:delete-all-failed");
+  }
+
   /**
    * Mark a fact as referenced — boosts confidence toward 1.0 and records
    * the timestamp. Called whenever a fact is injected into a prompt.

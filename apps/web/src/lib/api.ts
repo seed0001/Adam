@@ -275,6 +275,12 @@ export const api = {
       method: "DELETE",
     }),
 
+  clearAllProfileMemory: () =>
+    apiFetch<{ ok: boolean }>("/api/memory/profile", { method: "DELETE" }),
+
+  clearAllEpisodicMemory: () =>
+    apiFetch<{ ok: boolean }>("/api/memory/episodic", { method: "DELETE" }),
+
   getEpisodic: (limit = 50) =>
     apiFetch<{ entries: EpisodicEntry[] }>(`/api/memory/episodic?limit=${limit}`).then(
       (r) => r.entries,

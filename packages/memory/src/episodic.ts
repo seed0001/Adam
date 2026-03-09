@@ -117,6 +117,16 @@ export class EpisodicStore {
     }, "episodic:delete-failed");
   }
 
+  deleteAll(): Result<void, AdamError> {
+    return trySync(() => {
+      this.db
+        .update(episodicMemory)
+        .set({ deletedAt: new Date().toISOString() })
+        .where(isNull(episodicMemory.deletedAt))
+        .run();
+    }, "episodic:delete-all-failed");
+  }
+
   private decryptRow(row: EpisodicMemoryRow): EpisodicEntry {
     let content = row.content;
 
