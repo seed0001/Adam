@@ -34,12 +34,13 @@ export class EdgeTTSProvider implements IVoiceProvider {
       const buffer = Buffer.from(await result.audio.arrayBuffer());
       await writeFile(path, buffer);
 
-      // Estimate duration from subtitle boundaries if available
+      // Estimate duration from subtitle boundaries if available.
+      // EdgeTTS reports offset and duration in 100-nanosecond units → divide by 10000 to get ms.
       let durationMs = 0;
       const subs = result.subtitle;
       if (subs && subs.length > 0) {
         const last = subs[subs.length - 1];
-        durationMs = last ? Math.round((last.offset + last.duration) * 1000) : 0;
+        durationMs = last ? Math.round((last.offset + last.duration) / 10000) : 0;
       } else {
         durationMs = Math.round((buffer.length / 32000) * 1000); // rough MP3 estimate
       }
@@ -49,7 +50,9 @@ export class EdgeTTSProvider implements IVoiceProvider {
         durationMs,
         sampleRate: 24000,
         generatedAt: new Date(),
+        mimeType: "audio/mpeg",
       });
+
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return err(adamError("voice:edge-synthesis-failed", msg, e));

@@ -57,9 +57,12 @@ export type StatusData = {
 export type ChatResponse = {
   response: string;
   sessionId: string;
-  /** Base64-encoded MP3 when voice is enabled and a default voice profile exists */
+  /** Base64-encoded audio when voice is enabled */
   audioBase64?: string;
+  /** MIME type of the audio data */
+  audioMimeType?: string;
   /** Base64-encoded PNG/JPEG when generate_chat_background was used */
+
   backgroundBase64?: string;
 };
 
@@ -95,6 +98,69 @@ export type GoldenExample = {
   category: string;
   notes?: string;
   createdAt: string;
+};
+
+// ── Autonomous types ────────────────────────────────────────────────────────
+
+export type Artifacts = {
+  files: string[];
+  branches: string[];
+  sunoLinks: string[];
+  other?: Record<string, string[]>;
+};
+
+export type DriveState = {
+  boredomLevel: number;
+  perfectionismLevel: number;
+  noveltyDesire: number;
+  complexityBias?: "quick" | "medium" | "long";
+  lastJobStatus?: "success" | "failure";
+};
+
+export type AutonomousStatus = {
+  enabled: boolean;
+  startedAt?: string;
+  userHint?: string;
+  checkpointCount: number;
+  lastCheckpointAt?: string;
+  uptime?: number;
+};
+
+export type AutonomousJob = {
+  id: string;
+  type: string;
+  title: string;
+  status: "pending" | "running" | "completed" | "failed";
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  arcId?: string;
+};
+
+export type ActivityCheckpoint = {
+  id: string;
+  timestamp: string;
+  summary: string;
+  artifacts: Artifacts;
+  nextGoal?: string;
+  driveState?: DriveState;
+  sequenceNumber: number;
+};
+
+export type NotificationEvent = {
+  id: string;
+  timestamp: string;
+  type: "checkpoint" | "milestone" | "complete" | "error" | "approval-needed";
+  message: string;
+  artifacts?: Artifacts;
+  actionUrl?: string;
+  actionLabel?: string;
+};
+
+export type AutonomousActivity = {
+  checkpoints: ActivityCheckpoint[];
+  notifications: NotificationEvent[];
+  runningJobs: AutonomousJob[];
 };
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -195,6 +261,9 @@ export const api = {
     apiFetch<{ backgroundBase64: string }>(
       `/api/chat/background?sessionId=${encodeURIComponent(sessionId)}`,
     ).catch(() => null),
+
+  getAvatar: () =>
+    apiFetch<{ avatarBase64: string }>("/api/avatar").catch(() => null),
 
   getStatus: () => apiFetch<StatusData>("/api/status"),
 
@@ -411,6 +480,27 @@ export const api = {
 
   listGoldenExamples: () =>
     apiFetch<{ examples: GoldenExample[] }>("/api/golden-examples").then((r) => r.examples),
+
+  // ── Autonomous ─────────────────────────────────────────────────────────────
+
+  getAutonomousStatus: () => apiFetch<AutonomousStatus>("/api/autonomous/status"),
+
+  getAutonomousActivity: () => apiFetch<AutonomousActivity>("/api/autonomous/activity"),
+
+  enableAutonomous: (userHint?: string, timeoutHours?: number) =>
+    apiFetch<{ ok: boolean }>("/api/autonomous/on", {
+      method: "POST",
+      body: JSON.stringify({ userHint, timeoutHours }),
+    }),
+
+  disableAutonomous: () =>
+    apiFetch<{ ok: boolean }>("/api/autonomous/off", { method: "POST" }),
+
+  nudgeAutonomous: (hint: string) =>
+    apiFetch<{ ok: boolean }>("/api/autonomous/nudge", {
+      method: "POST",
+      body: JSON.stringify({ hint }),
+    }),
 };
 
 // ── Diagnostics types ─────────────────────────────────────────────────────────
@@ -564,4 +654,6 @@ export type SynthesisResult = {
   sampleRate: number;
   generatedAt: string;
   audioBase64?: string;
+  audioMimeType?: string;
+  mimeType?: string;
 };

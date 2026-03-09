@@ -7,9 +7,11 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   ts: Date;
-  /** Base64 MP3 for assistant voice responses */
+  /** Base64 audio for assistant voice responses */
   audioBase64?: string;
+  audioMimeType?: string;
 };
+
 
 function getSessionId(): string {
   const KEY = "adam_session_id";
@@ -53,7 +55,7 @@ function formatContent(text: string): React.ReactNode[] {
   });
 }
 
-function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
+function MsgBubble({ msg, agentName, avatarBase64 }: { msg: Message; agentName: string; avatarBase64: string | null }) {
   const isUser = msg.role === "user";
 
   if (isUser) {
@@ -74,7 +76,7 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
   return (
     <div className="flex gap-3">
       <div className="shrink-0 w-6 h-6 rounded-full overflow-hidden border border-[#2a2a2a] shadow-inner mt-1">
-        <img src="/avatar.png" alt="Adam" className="w-full h-full object-cover" />
+        <img src={avatarBase64 ? `data:image/png;base64,${avatarBase64}` : "/avatar.png"} alt="Adam" className="w-full h-full object-cover" />
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-[11px] text-accent font-medium mb-1">{agentName}</p>
@@ -85,7 +87,8 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
           <div className="mt-2 pl-1">
             <audio
               controls
-              src={`data:audio/mpeg;base64,${msg.audioBase64}`}
+              autoPlay
+              src={`data:${msg.audioMimeType || "audio/mpeg"};base64,${msg.audioBase64}`}
               className="w-full max-w-sm h-8"
             />
           </div>
@@ -98,11 +101,11 @@ function MsgBubble({ msg, agentName }: { msg: Message; agentName: string }) {
   );
 }
 
-function TypingIndicator({ agentName }: { agentName: string }) {
+function TypingIndicator({ agentName, avatarBase64 }: { agentName: string; avatarBase64: string | null }) {
   return (
     <div className="flex gap-3">
       <div className="shrink-0 w-6 h-6 rounded-full overflow-hidden border border-[#2a2a2a] shadow-inner mt-1">
-        <img src="/avatar.png" alt="Adam" className="w-full h-full object-cover" />
+        <img src={avatarBase64 ? `data:image/png;base64,${avatarBase64}` : "/avatar.png"} alt="Adam" className="w-full h-full object-cover" />
       </div>
       <div>
         <p className="text-[11px] text-accent font-medium mb-1">{agentName}</p>
@@ -124,6 +127,7 @@ export default function Chat() {
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [backgroundBase64, setBackgroundBase64] = useState<string | null>(null);
+  const [avatarBase64, setAvatarBase64] = useState<string | null>(null);
   const sessionId = useRef(getSessionId());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -139,6 +143,9 @@ export default function Chat() {
   useEffect(() => {
     api.getChatBackground(sessionId.current).then((r) => {
       if (r?.backgroundBase64) setBackgroundBase64(r.backgroundBase64);
+    });
+    api.getAvatar().then((r) => {
+      if (r?.avatarBase64) setAvatarBase64(r.avatarBase64);
     });
   }, []);
 
@@ -162,6 +169,12 @@ export default function Chat() {
       const res = await api.chat(text, sessionId.current);
       sessionId.current = res.sessionId;
       if (res.backgroundBase64) setBackgroundBase64(res.backgroundBase64);
+
+      // Re-fetch avatar in case generate_avatar tool was called
+      api.getAvatar().then(r => {
+        if (r?.avatarBase64) setAvatarBase64(r.avatarBase64);
+      });
+
       setMessages((prev) => [
         ...prev,
         {
@@ -170,7 +183,9 @@ export default function Chat() {
           content: res.response,
           ts: new Date(),
           audioBase64: res.audioBase64,
+          audioMimeType: res.audioMimeType,
         },
+
       ]);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Something went wrong");
@@ -219,7 +234,7 @@ export default function Chat() {
           {messages.length === 0 && !loading && (
             <div className="flex flex-col items-center justify-center h-full gap-2 select-none">
               <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-accent/30 shadow-2xl mb-2">
-                <img src="/avatar.png" alt="Adam" className="w-full h-full object-cover" />
+                <img src={avatarBase64 ? `data:image/png;base64,${avatarBase64}` : "/avatar.png"} alt="Adam" className="w-full h-full object-cover" />
               </div>
               <p className="text-zinc-500 text-sm">{agentName} is ready.</p>
               {activeModel && (
@@ -233,10 +248,10 @@ export default function Chat() {
           )}
 
           {messages.map((msg) => (
-            <MsgBubble key={msg.id} msg={msg} agentName={agentName} />
+            <MsgBubble key={msg.id} msg={msg} agentName={agentName} avatarBase64={avatarBase64} />
           ))}
 
-          {loading && <TypingIndicator agentName={agentName} />}
+          {loading && <TypingIndicator agentName={agentName} avatarBase64={avatarBase64} />}
 
           {error && (
             <div className="flex justify-center">

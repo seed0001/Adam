@@ -1,4 +1,6 @@
+console.log('--- ADAM DAEMON STARTING (DEBUG) ---');
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -6,9 +8,11 @@ import { join, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ADAM_HOME_DIR,
+  ADAM_ASSETS_DIR,
   ADAM_VERSION,
   PORTS,
   loadConfig,
+  getAdamHome,
   saveConfig,
   addLogHandler,
   createLogger,
@@ -35,6 +39,8 @@ import {
   ScratchpadStore,
   JobRegistry,
   agentEventBus,
+  AutonomousService,
+  SandboxManager,
 } from "@adam/core";
 import { SkillStore, type SkillSpec } from "@adam/skills";
 import { VoiceRegistry, VoiceOrchestrator } from "@adam/voice";
@@ -47,12 +53,14 @@ import {
   type BaseAdapter,
 } from "@adam/adapters";
 import {
-  webFetchTool,
-  readFileTool,
-  writeFileTool,
   listDirectoryTool,
   shellTool,
   createCodeTools,
+  screenshotTool,
+  findImagesTool,
+  saveImageTool,
+  emailTool,
+  createAvatarTool,
 } from "@adam/skills";
 import { buildModelPool as buildPool } from "./model-pool.js";
 import { BrowserSession } from "./browser.js";
@@ -69,6 +77,7 @@ import {
   PatchService,
   ReinforcementService,
 } from "@adam/diagnostics";
+import { registerAutonomousEndpoints } from "./autonomous-api-handlers.js";
 import type { CoreTool } from "ai";
 import type Database from "better-sqlite3";
 
@@ -111,6 +120,7 @@ type ApiContext = {
   patchService: PatchService;
   feedbackStore: FeedbackStore;
   reinforcementService: ReinforcementService;
+  autonomousService: AutonomousService;
   workspace: string;
 };
 
@@ -333,11 +343,16 @@ async function main() {
   const { adapters, discordAdapter } = await buildAdapters(config);
 
   const tools = new Map<string, CoreTool>([
-    ["web_fetch", webFetchTool],
-    ["read_file", readFileTool],
-    ["write_file", writeFileTool],
     ["list_directory", listDirectoryTool],
     ["shell", shellTool],
+    ["screenshot", screenshotTool],
+    ["find_images", findImagesTool],
+    ["save_image", saveImageTool],
+    ["email", emailTool],
+    ["generate_avatar", createAvatarTool((prompt: string) => generateChatBackground(prompt, ctx.config, async (p) => {
+      const r = await vault.get(`provider:${p}:api-key`);
+      return r.isOk() ? r.value : null;
+    }))],
   ]);
 
   // Discord outbound tools — only available when the Discord adapter is running
@@ -447,7 +462,13 @@ async function main() {
   // Falls back to capable if no dedicated coder model is configured.
   // Relative paths in code tools resolve against the workspace directory.
   const workspace = resolveWorkspace(config);
-  const codeTools = createCodeTools(router, generateId(), workspace);
+
+  const sandboxManager = new SandboxManager(
+    join(workspace, ".adam-sandbox"),
+    config.autonomousMode?.sandboxRoot ?? workspace
+  );
+
+  const codeTools = createCodeTools(router, generateId(), workspace, sandboxManager);
   for (const [name, t] of codeTools) tools.set(name, t);
   if (poolConfig.coder.length > 0) {
     logger.info(`Code tools active — coder: ${poolConfig.coder[0]?.model ?? "unknown"}, workspace: ${workspace}`);
@@ -469,7 +490,21 @@ async function main() {
       parameters: z.object({
         url: z.string().describe("Full URL to navigate to (include https://)"),
       }),
-      execute: async ({ url }) => browserSession.navigate(url),
+      execute: async ({ url: inputUrl }) => {
+        // Validate and normalize URL
+        let url = inputUrl.trim();
+        if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("file://")) {
+          // If URL doesn't have a scheme, assume https
+          url = "https://" + url;
+        }
+        // Basic URL validation
+        try {
+          new URL(url);
+        } catch {
+          throw new Error(`Invalid URL: ${inputUrl}. Make sure it's a valid URL like https://example.com`);
+        }
+        return browserSession.navigate(url);
+      },
     }),
   );
 
@@ -808,26 +843,26 @@ async function main() {
         logger.error("Agent processing failed", { error: result.error.message });
       }
 
-      // Synthesize voice when enabled and a profile is set
-      if (
-        outbound.voiceProfileId &&
-        config.voice?.enabled &&
-        outbound.content
-      ) {
-        const profile = voiceRegistry.get(outbound.voiceProfileId);
-        if (profile) {
-          const { tmpdir } = await import("node:os");
-          const outputPath = join(tmpdir(), `adam-tts-${Date.now()}.mp3`);
-          const synth = await voiceOrchestrator.synthesize(
-            outbound.content,
-            profile,
-            outputPath,
-          );
-          if (synth.isOk()) {
-            outbound = {
-              ...outbound,
-              metadata: { ...outbound.metadata, audioPath: outputPath },
-            };
+      // Synthesize voice when enabled — fall back to current default if agent had no profile at startup
+      if (config.voice?.enabled && outbound.content) {
+        const voiceId = outbound.voiceProfileId ?? voiceRegistry.getDefault()?.id ?? null;
+        if (voiceId) {
+          const profile = voiceRegistry.get(voiceId);
+          if (profile) {
+            const { tmpdir } = await import("node:os");
+            const ext = profile.provider === "lux" || profile.provider === "xtts" ? "wav" : "mp3";
+            const outputPath = join(tmpdir(), `adam-tts-${Date.now()}.${ext}`);
+            const synth = await voiceOrchestrator.synthesize(
+              outbound.content,
+              profile,
+              outputPath,
+            );
+            if (synth.isOk()) {
+              outbound = {
+                ...outbound,
+                metadata: { ...outbound.metadata, audioPath: outputPath },
+              };
+            }
           }
         }
       }
@@ -845,6 +880,19 @@ async function main() {
 
   const reviewLoop = new ReviewLoop(episodic, patchService, reinforcementService, patchStore, feedbackStore, workspace);
   reviewLoop.start();
+
+  // ── Autonomous Tinkering Mode ──────────────────────────────────────────
+  const autonomousService = new AutonomousService(
+    agent,
+    router,
+    episodic,
+    personality,
+    scratchpad,
+    skills,
+    config.autonomousMode,
+    sandboxManager,
+  );
+  logger.info("Autonomous Tinkering Mode initialized (not enabled — awaiting toggle)");
 
   const ctx: ApiContext = {
     config,
@@ -866,6 +914,7 @@ async function main() {
     patchService,
     feedbackStore,
     reinforcementService,
+    autonomousService,
     workspace,
   };
   const server = createApiServer(ctx);
@@ -885,6 +934,8 @@ async function main() {
 
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — shutting down`);
+    autonomousService.disable("daemon-shutdown");
+    await autonomousService.waitForCompletion();
     consolidator.stop();
     reviewLoop.stop();
     for (const adapter of adapters) await adapter.stop().catch(() => { });
@@ -912,7 +963,10 @@ const MIME: Record<string, string> = {
   ".json": "application/json",
   ".woff2": "font/woff2",
   ".woff": "font/woff",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
 };
+
 
 function findWebRoot(): string | null {
   const __dir = dirname(fileURLToPath(import.meta.url));
@@ -943,8 +997,14 @@ function serveStatic(res: ServerResponse, urlPath: string): void {
   const safePath = urlPath === "/" || !urlPath ? "index.html" : urlPath.replace(/^\//, "");
   const filePath = join(webRoot, safePath);
 
+  // Check persistent assets first (e.g. ~/.adam/assets/avatar.png)
+  const adamHome = getAdamHome();
+  const assetPath = join(adamHome, ADAM_ASSETS_DIR, safePath);
+
   const tryServe = (p: string): boolean => {
     if (!existsSync(p)) return false;
+    const stats = statSync(p);
+    if (!stats.isFile()) return false;
     const ext = extname(p);
     const mime = MIME[ext] ?? "application/octet-stream";
     res.writeHead(200, {
@@ -956,6 +1016,8 @@ function serveStatic(res: ServerResponse, urlPath: string): void {
     res.end(readFileSync(p));
     return true;
   };
+
+  if (tryServe(assetPath)) return;
 
   if (!tryServe(filePath)) {
     // SPA fallback — serve index.html for all unmatched routes
@@ -1210,29 +1272,64 @@ function createApiServer(ctx: ApiContext) {
         const patch = ctx.patchStore.get(id);
         if (!patch) return json(res, 404, { error: "Patch not found" });
 
-        // Apply the patch using the 'patch' command or similar
-        const absolutePath = join(ctx.workspace, patch.filePath);
-        if (!existsSync(absolutePath)) return json(res, 404, { error: `File not found: ${patch.filePath}` });
+        const workspace = resolveWorkspace(ctx.config);
+        const fileAbsPath = join(workspace, patch.filePath);
+        if (!existsSync(fileAbsPath)) {
+          return json(res, 404, { error: `File not found: ${patch.filePath}. Expected path: ${fileAbsPath}` });
+        }
 
         logger.info(`Applying approved patch to ${patch.filePath}`, { id });
 
-        // Write diff to temp file
-        const diffPath = join(homedir(), ADAM_HOME_DIR, ".tmp", `patch-${id}.diff`);
-        const { writeFileSync, mkdirSync } = await import("node:fs");
-        if (!existsSync(dirname(diffPath))) mkdirSync(dirname(diffPath), { recursive: true });
-        writeFileSync(diffPath, patch.diff);
-
-        // Run git apply command
+        const { writeFileSync, mkdirSync, readFileSync, existsSync: fsExistsSync } = await import("node:fs");
         const { spawnSync } = await import("node:child_process");
-        const patchCmd = spawnSync("git", ["apply", "--ignore-whitespace", diffPath], { cwd: ctx.workspace });
+        const tmpDir = join(homedir(), ADAM_HOME_DIR, ".tmp");
+        const diffPath = join(tmpDir, `patch-${id}.diff`);
 
-        if (patchCmd.status !== 0) {
-          logger.error("Failed to apply patch via git", { id, stderr: patchCmd.stderr.toString() });
-          return json(res, 500, { error: "Failed to apply patch via 'git apply'. Make sure the diff is valid for this file version.", details: patchCmd.stderr.toString() });
+        mkdirSync(tmpDir, { recursive: true });
+        writeFileSync(diffPath, patch.diff, "utf-8");
+
+        let applied = false;
+        let errorMsg = "";
+
+        // Strategy 1: Try git apply (most reliable for unified diffs)
+        logger.info("Attempting to apply patch via 'git apply'...");
+        const gitResult = spawnSync("git", ["apply", "--ignore-whitespace", "--reject", diffPath], {
+          cwd: ctx.workspace,
+          encoding: "utf-8",
+        });
+
+        if (gitResult.status === 0) {
+          applied = true;
+          logger.info("Patch applied successfully via git apply");
+        } else {
+          errorMsg = gitResult.stderr || gitResult.stdout || "Unknown error";
+          logger.warn("git apply failed, trying patch command...", { error: errorMsg });
+
+          // Strategy 2: Try the 'patch' command (can be more lenient)
+          const patchResult = spawnSync("patch", ["-p1", "--ignore-whitespace", "--force", "-i", diffPath], {
+            cwd: ctx.workspace,
+            encoding: "utf-8",
+          });
+
+          if (patchResult.status === 0) {
+            applied = true;
+            logger.info("Patch applied successfully via 'patch' command");
+          } else {
+            errorMsg = patchResult.stderr || patchResult.stdout || "patch command also failed";
+            logger.error("Both git apply and patch failed", { error: errorMsg });
+          }
         }
 
-        ctx.patchStore.updateStatus(id, "applied");
-        return json(res, 200, { ok: true, message: "Patch applied successfully" });
+        if (applied) {
+          ctx.patchStore.updateStatus(id, "applied");
+          return json(res, 200, { ok: true, message: "Patch applied successfully" });
+        } else {
+          return json(res, 500, {
+            error: "Failed to apply patch. Both 'git apply' and 'patch' commands failed.",
+            details: errorMsg,
+            suggestion: "This may be due to whitespace differences or the file state changing since the patch was generated. Try regenerating the patch.",
+          });
+        }
       }
 
       // ── POST /api/patches/:id/reject ───────────────────────────────────────
@@ -2279,30 +2376,33 @@ function createApiServer(ctx: ApiContext) {
 
         let audioBase64: string | undefined;
 
-        if (
-          outbound.voiceProfileId &&
-          ctx.config.voice?.enabled &&
-          responseContent
-        ) {
-          const profile = ctx.voiceRegistry.get(outbound.voiceProfileId);
-          if (profile) {
-            const { tmpdir } = await import("node:os");
-            const outputPath = join(tmpdir(), `adam-tts-web-${Date.now()}.mp3`);
-            const synth = await ctx.voiceOrchestrator.synthesize(
-              responseContent,
-              profile,
-              outputPath,
-            );
-            if (synth.isOk()) {
-              const { readFileSync, unlinkSync } = await import("node:fs");
-              try {
-                const buf = readFileSync(outputPath);
-                audioBase64 = buf.toString("base64");
-              } finally {
+        if (ctx.config.voice?.enabled && responseContent) {
+          // Fall back to current default if agent had no profile baked in at startup
+          const voiceId = outbound.voiceProfileId ?? ctx.voiceRegistry.getDefault()?.id ?? null;
+          if (voiceId) {
+            const profile = ctx.voiceRegistry.get(voiceId);
+            if (profile) {
+              const { tmpdir } = await import("node:os");
+              const ext = profile.provider === "lux" || profile.provider === "xtts" ? "wav" : "mp3";
+              const outputPath = join(tmpdir(), `adam-tts-web-${Date.now()}.${ext}`);
+
+              const synth = await ctx.voiceOrchestrator.synthesize(
+                responseContent,
+                profile,
+                outputPath,
+              );
+              if (synth.isOk()) {
+                const { readFileSync, unlinkSync } = await import("node:fs");
                 try {
-                  unlinkSync(outputPath);
-                } catch {
-                  /* ignore */
+                  const buf = readFileSync(outputPath);
+                  audioBase64 = buf.toString("base64");
+                  (outbound.metadata as any).audioMimeType = synth.value.mimeType;
+                } finally {
+                  try {
+                    unlinkSync(outputPath);
+                  } catch {
+                    /* ignore */
+                  }
                 }
               }
             }
@@ -2315,8 +2415,10 @@ function createApiServer(ctx: ApiContext) {
           response: responseContent,
           sessionId,
           ...(audioBase64 && { audioBase64 }),
+          audioMimeType: (outbound.metadata as any).audioMimeType,
           ...(backgroundBase64 && { backgroundBase64 }),
         });
+
       }
 
       // ── GET /api/chat/events/:sessionId ───────────────────────────────────
@@ -2350,6 +2452,21 @@ function createApiServer(ctx: ApiContext) {
         const bg = ctx.chatBackgroundStore.get(sid);
         if (!bg) return json(res, 404, { error: "No background for this session" });
         return json(res, 200, { backgroundBase64: bg });
+      }
+
+      // ── GET /api/avatar ────────────────────────────────────────────────────
+      if (path === "/api/avatar" && req.method === "GET") {
+        const adamHome = getAdamHome();
+        const avatarPath = join(adamHome, ADAM_ASSETS_DIR, "avatar.png");
+        if (existsSync(avatarPath)) {
+          try {
+            const buf = readFileSync(avatarPath);
+            return json(res, 200, { avatarBase64: buf.toString("base64") });
+          } catch (e) {
+            logger.error("Failed to read avatar", { error: String(e) });
+          }
+        }
+        return json(res, 404, { error: "No custom avatar set" });
       }
 
       // ── GET /api/memory/profile ────────────────────────────────────────────
@@ -2746,28 +2863,69 @@ function createApiServer(ctx: ApiContext) {
         const profile = ctx.voiceRegistry.get(body.voiceProfileId);
         if (!profile) return json(res, 404, { error: "Voice profile not found" });
         const { tmpdir } = await import("node:os");
-        const { join } = await import("node:path");
         const { readFileSync, unlinkSync, existsSync } = await import("node:fs");
-        const outputPath = join(tmpdir(), `adam-tts-${Date.now()}.mp3`);
+
+        const ext = profile.provider === "lux" || profile.provider === "xtts" ? "wav" : "mp3";
+        const outputPath = join(tmpdir(), `adam-tts-${Date.now()}.${ext}`);
+
         const result = await ctx.voiceOrchestrator.synthesize(body.text, profile, outputPath);
         if (result.isErr()) return json(res, 500, { error: result.error.message });
         const synth = result.value;
-        const payload: Record<string, unknown> = {
+        console.log('[DEBUG] Synthesis result:', { ...synth, audioBase64: '...' });
+        const payload: Record<string, any> = {
           audioPath: synth.audioPath,
           durationMs: synth.durationMs,
           sampleRate: synth.sampleRate,
           generatedAt: synth.generatedAt.toISOString(),
+          mimeType: synth.mimeType,
+          audioMimeType: synth.mimeType,
         };
         if (body.format === "base64") {
           try {
             const buf = readFileSync(synth.audioPath);
             payload.audioBase64 = buf.toString("base64");
+            payload.mimeType = synth.mimeType;
+            payload.audioMimeType = synth.mimeType;
+            console.log('[DEBUG] Base64 conversion success, mimeType:', synth.mimeType);
             if (existsSync(synth.audioPath)) unlinkSync(synth.audioPath);
-          } catch {
-            // fallback: still return path
+          } catch (err) {
+            console.error('[DEBUG] Base64 conversion error:', err);
           }
         }
+
         return json(res, 200, payload);
+      }
+
+      // ── Autonomous Tinkering Mode endpoints ────────────────────────────────
+      const autonomousHandlers = registerAutonomousEndpoints(ctx.autonomousService, { json, readBody });
+
+      if (path === "/api/autonomous/on" && req.method === "POST") {
+        return await autonomousHandlers.onEnable(req, res);
+      }
+
+      if (path === "/api/autonomous/off" && req.method === "POST") {
+        return await autonomousHandlers.onDisable(req, res);
+      }
+
+      if (path === "/api/autonomous/status" && req.method === "GET") {
+        return autonomousHandlers.onStatus(req, res);
+      }
+
+      if (path === "/api/autonomous/activity" && req.method === "GET") {
+        const recent = url.searchParams.get("recent");
+        return autonomousHandlers.onActivity(req, res, { recent: recent ? parseInt(recent, 10) : undefined });
+      }
+
+      if (path === "/api/autonomous/notifications" && req.method === "GET") {
+        return autonomousHandlers.onNotifications(req, res);
+      }
+
+      if (path === "/api/autonomous/notifications" && req.method === "DELETE") {
+        return autonomousHandlers.onClearNotifications(req, res);
+      }
+
+      if (path === "/api/autonomous/nudge" && req.method === "POST") {
+        return await autonomousHandlers.onNudge(req, res);
       }
 
       // ── Static web UI ──────────────────────────────────────────────────────
