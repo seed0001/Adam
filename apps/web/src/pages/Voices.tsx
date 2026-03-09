@@ -267,8 +267,10 @@ function VoiceDetailModal({ voice, onClose, onUpdate, onDelete }: {
     try {
       const result = await api.synthesizeVoice("Hello, this is a test of the voice.", voice.id);
       if (result.audioBase64) {
-        setAudioUrl(`data:audio/mpeg;base64,${result.audioBase64}`);
+        const mime = "audio/mpeg";
+        setAudioUrl(`data:${mime};base64,${result.audioBase64}`);
       }
+
     } catch {
       // ignore
     } finally {

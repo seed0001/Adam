@@ -606,7 +606,7 @@ async function runRepl(
       const lines = result.value.content.split("\n");
       const indent = " ".repeat(agentName.toLowerCase().length + 4);
       const formatted = lines
-        .map((line, i) => (i === 0 ? `${agentLabel} ${line}` : `${indent}${line}`))
+        .map((line: string, i: number) => (i === 0 ? `${agentLabel} ${line}` : `${indent}${line}`))
         .join("\n");
       console.log(formatted);
       console.log(modelTag ? `${indent}${modelTag}\n` : "");

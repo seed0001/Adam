@@ -10,14 +10,25 @@ No cloud dependency by default. No subscription. No data leaving your machine un
 
 ## Quick start
 
+To clone this specific branch:
+
 ```bash
-git clone https://github.com/seed0001/Adam.git
+git clone -b fix-local-llm-issues-2659895389396962210 https://github.com/seed0001/Adam.git
 cd Adam
 pnpm install
 pnpm build
 cd packages/cli && pnpm link --global && cd ../..
 adam init
 adam start
+```
+
+If you have already cloned the repository and want to switch to this branch:
+
+```bash
+git fetch origin
+git checkout fix-local-llm-issues-2659895389396962210
+pnpm install
+pnpm build
 ```
 
 Then open **http://localhost:18800** in your browser.
