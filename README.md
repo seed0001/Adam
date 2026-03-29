@@ -34,8 +34,8 @@ The architecture is organized around a set of core ideas:
 
 | Capability | Status |
 |---|---|
-| Interactive terminal chat (`adam chat`) | ✅ |
-| Always-on daemon (`adam start` / `adam stop`) | ✅ |
+| Interactive terminal chat (`pnpm adam -- chat`) | ✅ |
+| Always-on daemon (`pnpm adam -- start` / `pnpm adam -- stop`) | ✅ |
 | Web dashboard — chat, memory, status, settings, providers, scratchpad, skills | ✅ |
 | 4-layer SQLite memory (episodic, semantic, profile, working) | ✅ |
 | Memory decay + reinforcement (Neural CA-inspired lifecycle) | ✅ |
@@ -77,51 +77,38 @@ The architecture is organized around a set of core ideas:
 git clone https://github.com/seed0001/Adam.git
 cd Adam
 pnpm install
-pnpm build
 ```
 
-Link the CLI globally:
+The first `pnpm install` builds the whole monorepo automatically (via the `prepare` script), so the CLI is ready immediately — no separate build step and no global `pnpm link`.
+
+**Run the CLI from the repository root** with `pnpm adam -- …` (the `--` forwards arguments to the `adam` binary):
 
 ```bash
-cd packages/cli
-pnpm link --global
-cd ../..
+pnpm adam -- init
+pnpm adam -- chat
+pnpm adam -- start
 ```
 
-Configure Adam (interactive wizard):
+Then open **http://localhost:18800** in your browser when the daemon is running.
 
-```bash
-adam init
-```
-
-Start chatting immediately — no daemon required:
-
-```bash
-adam chat
-```
-
-Or start the always-on daemon with the web dashboard:
-
-```bash
-adam start
-```
-
-Then open **http://localhost:18800** in your browser.
+To rebuild after pulling changes: `pnpm build`. If you ever need a quick install without compiling, use `pnpm install --ignore-scripts` and run `pnpm build` before `pnpm adam`.
 
 ---
 
 ## CLI commands
 
+From the repo root, prefix these with `pnpm adam --` (for example `pnpm adam -- status`).
+
 ```
-adam init              — Interactive setup wizard (providers, adapters, budget)
-adam chat              — Start a terminal chat session
-adam start             — Start the daemon in the background
-adam stop              — Stop the running daemon
-adam status            — Show daemon status, active adapters, model pool, memory stats
-adam voice             — Voice chat session (requires LuxTTS sidecar)
+init              — Interactive setup wizard (providers, adapters, budget)
+chat              — Start a terminal chat session
+start             — Start the daemon in the background
+stop              — Stop the running daemon
+status            — Show daemon status, active adapters, model pool, memory stats
+voice             — Voice chat session (requires LuxTTS sidecar)
 ```
 
-### In-session commands (`adam chat`)
+### In-session commands (after `pnpm adam -- chat`)
 
 ```
 /help                      — show commands
@@ -150,7 +137,7 @@ adam voice             — Voice chat session (requires LuxTTS sidecar)
 
 ## Providers
 
-`adam init` walks you through provider setup. You need at least one.
+`pnpm adam -- init` walks you through provider setup. You need at least one.
 
 **Local (free, private)**
 - [Ollama](https://ollama.com) — `ollama pull llama3.2` then enable in init
@@ -307,7 +294,7 @@ This isn't a static system prompt. It's a living document that drifts toward wha
 
 ## Web dashboard
 
-Start the daemon (`adam start`) and open **http://localhost:18800**.
+Start the daemon (`pnpm adam -- start`) and open **http://localhost:18800**.
 
 | Tab | What's there |
 |---|---|
@@ -369,7 +356,7 @@ adam/
 
 ## Configuration
 
-Config lives at `~/.adam/config.json`. Managed via `adam init` or the web dashboard.
+Config lives at `~/.adam/config.json`. Managed via `pnpm adam -- init` or the web dashboard.
 
 ```json
 {
@@ -416,7 +403,7 @@ API keys are **never** stored in this file. They live in the OS keychain.
 
 **Discord**
 
-Configure a bot token via `adam init` or the web dashboard. The Discord adapter supports:
+Configure a bot token via `pnpm adam -- init` or the web dashboard. The Discord adapter supports:
 - Channel allowlisting / blocklisting
 - Per-user filtering
 - Per-channel rate limiting
@@ -427,7 +414,7 @@ Adam can also post to Discord on request from any interface — "post a notifica
 
 **Telegram**
 
-Configure a bot token via `adam init`. The adapter supports private chats and group mentions.
+Configure a bot token via `pnpm adam -- init`. The adapter supports private chats and group mentions.
 
 ---
 
@@ -446,7 +433,7 @@ Configure a bot token via `adam init`. The adapter supports private chats and gr
 
 Adam uses [LuxTTS](https://huggingface.co/YatharthS/LuxTTS) for voice synthesis via a Python sidecar.
 
-`adam init` can automate the installation and optionally start the sidecar automatically when voice is enabled.
+`pnpm adam -- init` can automate the installation and optionally start the sidecar automatically when voice is enabled.
 
 **Manual setup:**
 
@@ -458,7 +445,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Then run `adam voice` for a voice-enabled chat session, or enable it in config:
+Then run `pnpm adam -- voice` for a voice-enabled chat session, or enable it in config:
 
 ```json
 { "voice": { "enabled": true } }
@@ -469,7 +456,7 @@ Then run `adam voice` for a voice-enabled chat session, or enable it in config:
 ## Development
 
 ```bash
-pnpm build          # build all packages (Turborepo, cached)
+pnpm build          # build all packages (Turborepo, cached); also runs after `pnpm install`
 pnpm test           # run all tests
 pnpm typecheck      # TypeScript strict check across the monorepo
 pnpm lint           # ESLint
