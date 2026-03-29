@@ -9,6 +9,8 @@
     "pnpm": ">=10.0.0"
   },
   "scripts": {
+    "adam": "node ./packages/cli/dist/bin.js",
+    "prepare": "pnpm run build",
     "build": "turbo build",
     "dev": "turbo dev",
     "lint": "turbo lint",

@@ -1,5 +1,8 @@
 import tseslint from "@typescript-eslint/eslint-plugin";
 import tsparser from "@typescript-eslint/parser";
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
