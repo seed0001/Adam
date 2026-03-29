@@ -2,15 +2,17 @@
   "name": "adam",
   "version": "0.1.0",
   "private": true,
-  "description": "Adam — open-source autonomous AI agent",
+  "description": "Adam \u2014 open-source autonomous AI agent",
   "packageManager": "pnpm@10.14.0",
   "engines": {
     "node": ">=22.0.0",
     "pnpm": ">=10.0.0"
   },
   "scripts": {
-    "build": "turbo build",
-    "dev": "turbo dev",
+    "adam": "node ./packages/cli/dist/bin.js",
+    "prepare": "pnpm run build",
+    "build": "node api.js && turbo build",
+    "dev": "node api.js && turbo dev",
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",
     "test": "turbo test",
